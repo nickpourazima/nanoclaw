@@ -27,6 +27,7 @@ Single Node.js process that connects to WhatsApp, routes messages to Claude Agen
 |-------|-------------|
 | `/setup` | First-time installation, authentication, service configuration |
 | `/customize` | Adding channels, integrations, changing behavior |
+| `/add-signal` | Add Signal channel via signal-cli (requires Java 21+) |
 | `/debug` | Container issues, logs, troubleshooting |
 
 ## Development
