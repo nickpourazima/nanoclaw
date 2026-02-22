@@ -7,7 +7,7 @@ import { lookupSenderName } from '../db.js';
 import { logger } from '../logger.js';
 import { Attachment, Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
 
-const HEALTH_TIMEOUT_MS = 60000;
+const HEALTH_TIMEOUT_MS = 120000;
 const HEALTH_POLL_MS = 500;
 const MAX_PENDING_RPC = 100;
 const MAX_OUTGOING_QUEUE = 1000;
@@ -55,7 +55,7 @@ export class SignalChannel implements Channel {
 
   private proc: ChildProcess | null = null;
   private connected = false;
-  private outgoingQueue: Array<{ jid: string; text: string }> = [];
+  private outgoingQueue: Array<{ jid: string; text: string; attachments?: string[] }> = [];
   private flushing = false;
   private stdoutBuffer = '';
   private rpcIdCounter = 0;
@@ -90,7 +90,7 @@ export class SignalChannel implements Channel {
     );
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(jid: string, text: string, attachments?: string[]): Promise<void> {
     // Signal bot always has its own identity (contact name), no prefix needed
     const prefixed = text;
 
@@ -99,20 +99,20 @@ export class SignalChannel implements Channel {
         const dropped = this.outgoingQueue.shift();
         logger.warn({ droppedJid: dropped?.jid, queueSize: this.outgoingQueue.length }, 'Signal outgoing queue full, dropping oldest message');
       }
-      this.outgoingQueue.push({ jid, text: prefixed });
-      logger.info({ jid, length: prefixed.length, queueSize: this.outgoingQueue.length }, 'Signal disconnected, message queued');
+      this.outgoingQueue.push({ jid, text: prefixed, attachments });
+      logger.info({ jid, length: prefixed.length, attachments: attachments?.length, queueSize: this.outgoingQueue.length }, 'Signal disconnected, message queued');
       return;
     }
 
     try {
-      await this.rpcSend(jid, prefixed);
-      logger.info({ jid, length: prefixed.length }, 'Signal message sent');
+      await this.rpcSend(jid, prefixed, attachments);
+      logger.info({ jid, length: prefixed.length, attachments: attachments?.length }, 'Signal message sent');
     } catch (err) {
       if (this.outgoingQueue.length >= MAX_OUTGOING_QUEUE) {
         const dropped = this.outgoingQueue.shift();
         logger.warn({ droppedJid: dropped?.jid, queueSize: this.outgoingQueue.length }, 'Signal outgoing queue full, dropping oldest message');
       }
-      this.outgoingQueue.push({ jid, text: prefixed });
+      this.outgoingQueue.push({ jid, text: prefixed, attachments });
       logger.warn({ jid, err, queueSize: this.outgoingQueue.length }, 'Failed to send Signal message, queued');
     }
   }
@@ -464,7 +464,7 @@ export class SignalChannel implements Channel {
     logger.info({ chatJid }, '/chatid response sent');
   }
 
-  private async rpcSend(jid: string, text: string): Promise<void> {
+  private async rpcSend(jid: string, text: string, attachments?: string[]): Promise<void> {
     const target = jid.replace(/^signal:/, '');
 
     const params: Record<string, unknown> = { message: text };
@@ -477,6 +477,10 @@ export class SignalChannel implements Channel {
     } else {
       // Group ID (base64)
       params.groupId = target;
+    }
+
+    if (attachments && attachments.length > 0) {
+      params.attachment = attachments;
     }
 
     await this.rpcCall('send', params);
@@ -526,8 +530,8 @@ export class SignalChannel implements Channel {
       logger.info({ count: this.outgoingQueue.length }, 'Flushing Signal outgoing queue');
       while (this.outgoingQueue.length > 0) {
         const item = this.outgoingQueue.shift()!;
-        await this.rpcSend(item.jid, item.text);
-        logger.info({ jid: item.jid, length: item.text.length }, 'Queued Signal message sent');
+        await this.rpcSend(item.jid, item.text, item.attachments);
+        logger.info({ jid: item.jid, length: item.text.length, attachments: item.attachments?.length }, 'Queued Signal message sent');
       }
     } finally {
       this.flushing = false;

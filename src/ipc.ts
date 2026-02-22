@@ -5,8 +5,10 @@ import { CronExpressionParser } from 'cron-parser';
 
 import {
   DATA_DIR,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
+  SIGNAL_CLI_DIR,
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
@@ -15,7 +17,7 @@ import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string, attachments?: string[]) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -26,6 +28,89 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+}
+
+/**
+ * Resolve container file paths to host paths using known mount mappings.
+ * Only paths under known mounts are allowed (prevents path traversal).
+ * Missing files are logged and skipped.
+ */
+function resolveAttachmentPaths(
+  containerPaths: string[] | undefined,
+  sourceGroup: string,
+  registeredGroups: Record<string, RegisteredGroup>,
+): string[] | undefined {
+  if (!containerPaths || containerPaths.length === 0) return undefined;
+
+  // Build prefix map: container prefix → host prefix
+  const prefixMap: Array<[string, string]> = [];
+
+  // /workspace/group/ → groups/{folder}/
+  const groupEntry = Object.values(registeredGroups).find(
+    (g) => g.folder === sourceGroup,
+  );
+  if (groupEntry) {
+    prefixMap.push([
+      '/workspace/group/',
+      path.join(GROUPS_DIR, groupEntry.folder) + '/',
+    ]);
+  }
+
+  // /workspace/ipc/ → data/ipc/{sourceGroup}/
+  prefixMap.push([
+    '/workspace/ipc/',
+    path.join(DATA_DIR, 'ipc', sourceGroup) + '/',
+  ]);
+
+  // /workspace/signal-attachments/ → {SIGNAL_CLI_DIR}/attachments/
+  if (SIGNAL_CLI_DIR) {
+    prefixMap.push([
+      '/workspace/signal-attachments/',
+      path.join(SIGNAL_CLI_DIR, 'attachments') + '/',
+    ]);
+  }
+
+  // /workspace/extra/{name}/ → resolved from additionalMounts
+  if (groupEntry?.containerConfig?.additionalMounts) {
+    for (const mount of groupEntry.containerConfig.additionalMounts) {
+      const containerSuffix = mount.containerPath || path.basename(mount.hostPath);
+      prefixMap.push([
+        `/workspace/extra/${containerSuffix}/`,
+        mount.hostPath.replace(/^~/, process.env.HOME || '') + '/',
+      ]);
+    }
+  }
+
+  const resolved: string[] = [];
+  for (const containerPath of containerPaths) {
+    let hostPath: string | undefined;
+    for (const [containerPrefix, hostPrefix] of prefixMap) {
+      if (containerPath.startsWith(containerPrefix)) {
+        const relative = containerPath.slice(containerPrefix.length);
+        // Reject path traversal attempts
+        if (relative.includes('..')) {
+          logger.warn({ containerPath, sourceGroup }, 'Path traversal rejected in attachment');
+          continue;
+        }
+        hostPath = path.join(hostPrefix, relative);
+        break;
+      }
+    }
+
+    if (!hostPath) {
+      logger.warn({ containerPath, sourceGroup }, 'Attachment path does not match any known mount');
+      continue;
+    }
+
+    if (!fs.existsSync(hostPath)) {
+      logger.warn({ containerPath, hostPath, sourceGroup }, 'Attachment file not found on host');
+      continue;
+    }
+
+    resolved.push(hostPath);
+  }
+
+  return resolved.length > 0 ? resolved : undefined;
 }
 
 let ipcWatcherRunning = false;
@@ -78,7 +163,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  const hostAttachments = resolveAttachmentPaths(
+                    data.attachments,
+                    sourceGroup,
+                    registeredGroups,
+                  );
+                  await deps.sendMessage(data.chatJid, data.text, hostAttachments);
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
                     'IPC message sent',
