@@ -14,6 +14,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  SIGNAL_CLI_DIR,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
@@ -172,6 +173,18 @@ function buildVolumeMounts(
       isMain,
     );
     mounts.push(...validatedMounts);
+  }
+
+  // Signal-cli attachments directory (read-only so agent can read images)
+  if (SIGNAL_CLI_DIR) {
+    const attachmentsDir = path.join(SIGNAL_CLI_DIR, 'attachments');
+    if (fs.existsSync(attachmentsDir)) {
+      mounts.push({
+        hostPath: attachmentsDir,
+        containerPath: '/workspace/signal-attachments',
+        readonly: true,
+      });
+    }
   }
 
   return mounts;

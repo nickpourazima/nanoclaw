@@ -15,7 +15,7 @@ const envConfig = readEnvFile([
 ]);
 
 export const ASSISTANT_NAME =
-  process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
+  process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Echo';
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER || envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const POLL_INTERVAL = 2000;
@@ -62,7 +62,7 @@ function escapeRegex(str: string): string {
 }
 
 export const TRIGGER_PATTERN = new RegExp(
-  `^@${escapeRegex(ASSISTANT_NAME)}\\b`,
+  `(?:^|\\s)@${escapeRegex(ASSISTANT_NAME)}\\b`,
   'i',
 );
 
@@ -73,6 +73,11 @@ export const SIGNAL_CLI_PATH =
   process.env.SIGNAL_CLI_PATH || envConfig.SIGNAL_CLI_PATH || 'signal-cli';
 export const SIGNAL_ONLY =
   (process.env.SIGNAL_ONLY || envConfig.SIGNAL_ONLY) === 'true';
+
+// Signal-cli root directory (attachments are stored at {root}/attachments/)
+export const SIGNAL_CLI_DIR = SIGNAL_PHONE_NUMBER
+  ? path.join(os.homedir(), '.local', 'share', 'signal-cli')
+  : '';
 
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default

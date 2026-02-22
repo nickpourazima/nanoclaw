@@ -14,6 +14,7 @@ vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  SIGNAL_CLI_DIR: '',
 }));
 
 // Mock logger
@@ -87,7 +88,7 @@ import type { RegisteredGroup } from './types.js';
 const testGroup: RegisteredGroup = {
   name: 'Test Group',
   folder: 'test-group',
-  trigger: '@Andy',
+  trigger: '@Echo',
   added_at: new Date().toISOString(),
 };
 

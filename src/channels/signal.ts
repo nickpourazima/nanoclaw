@@ -1,8 +1,11 @@
 import { ChildProcess, spawn } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 
-import { ASSISTANT_NAME, SIGNAL_CLI_PATH, SIGNAL_PHONE_NUMBER } from '../config.js';
+import { ASSISTANT_NAME, SIGNAL_CLI_DIR, SIGNAL_CLI_PATH, SIGNAL_PHONE_NUMBER } from '../config.js';
+import { lookupSenderName } from '../db.js';
 import { logger } from '../logger.js';
-import { Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
+import { Attachment, Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
 
 const HEALTH_TIMEOUT_MS = 60000;
 const HEALTH_POLL_MS = 500;
@@ -247,13 +250,24 @@ export class SignalChannel implements Channel {
     // Handle dataMessage (incoming messages from others)
     const dataMessage = envelope.dataMessage as Record<string, unknown> | undefined;
     if (dataMessage) {
+      if (dataMessage.attachments) {
+        logger.info({ attachments: dataMessage.attachments, SIGNAL_CLI_DIR }, 'Signal dataMessage has attachments');
+      }
+      if (dataMessage.quote) {
+        logger.info({ quote: dataMessage.quote }, 'Signal dataMessage has quote');
+      }
+      const resolvedMessage = resolveMentions(dataMessage.message as string | undefined, dataMessage.mentions as Array<Record<string, unknown>> | undefined);
+      logger.info({ rawMessage: dataMessage.message, mentions: dataMessage.mentions, resolvedMessage }, 'Signal dataMessage resolved');
       this.processMessage({
         sourceId,
         sourceName,
         timestamp,
-        message: resolveMentions(dataMessage.message as string | undefined, dataMessage.mentions as Array<Record<string, unknown>> | undefined),
+        message: resolvedMessage,
         groupInfo: dataMessage.groupInfo as Record<string, unknown> | undefined,
         isFromMe: false,
+        rawAttachments: dataMessage.attachments as Array<Record<string, unknown>> | undefined,
+        rawQuote: dataMessage.quote as Record<string, unknown> | undefined,
+        rawReaction: dataMessage.reaction as Record<string, unknown> | undefined,
       });
       return;
     }
@@ -273,6 +287,9 @@ export class SignalChannel implements Channel {
         message: resolveMentions(sentMessage.message as string | undefined, sentMessage.mentions as Array<Record<string, unknown>> | undefined),
         groupInfo: sentMessage.groupInfo as Record<string, unknown> | undefined,
         isFromMe: true,
+        rawAttachments: sentMessage.attachments as Array<Record<string, unknown>> | undefined,
+        rawQuote: sentMessage.quote as Record<string, unknown> | undefined,
+        rawReaction: sentMessage.reaction as Record<string, unknown> | undefined,
       });
     }
   }
@@ -284,6 +301,9 @@ export class SignalChannel implements Channel {
     message: string | undefined;
     groupInfo: Record<string, unknown> | undefined;
     isFromMe: boolean;
+    rawAttachments?: Array<Record<string, unknown>>;
+    rawQuote?: Record<string, unknown>;
+    rawReaction?: Record<string, unknown>;
   }): void {
     // Determine JID
     let chatJid: string;
@@ -319,7 +339,107 @@ export class SignalChannel implements Channel {
     const groups = this.opts.registeredGroups();
     if (!groups[chatJid]) return;
 
-    if (!msg.message) return;
+    // Build attachments list (only files that exist on disk)
+    // signal-cli stores attachments at {SIGNAL_CLI_DIR}/attachments/{id}.{ext}
+    let attachments: Attachment[] | undefined;
+    if (msg.rawAttachments && SIGNAL_CLI_DIR) {
+      const attachmentsDir = path.join(SIGNAL_CLI_DIR, 'attachments');
+      const built: Attachment[] = [];
+      for (const att of msg.rawAttachments) {
+        const id = att.id as string | undefined;
+        if (!id) continue;
+        // File on disk has an extension (e.g., "78N2k4upTgauPHKgIcNQ.jpg")
+        // Find by matching the ID prefix
+        let hostPath: string | undefined;
+        let diskFilename: string | undefined;
+        try {
+          const files = fs.readdirSync(attachmentsDir);
+          const match = files.find((f) => f.startsWith(id));
+          if (match) {
+            hostPath = path.join(attachmentsDir, match);
+            diskFilename = match;
+          }
+        } catch {
+          // attachmentsDir doesn't exist or isn't readable
+        }
+        if (!hostPath) continue;
+        built.push({
+          contentType: (att.contentType as string) || 'application/octet-stream',
+          filename: (att.filename as string | undefined) || diskFilename,
+          hostPath,
+          containerPath: `/workspace/signal-attachments/${diskFilename}`,
+          size: att.size as number | undefined,
+        });
+      }
+      if (built.length > 0) attachments = built;
+    }
+
+    // Build quote (reply-to context)
+    let quote: { author: string; text: string } | undefined;
+    if (msg.rawQuote) {
+      const quoteAuthorId = (msg.rawQuote.authorNumber as string)
+        || (msg.rawQuote.authorUuid as string)
+        || (msg.rawQuote.author as string)
+        || 'unknown';
+      // Resolve UUID to a human-readable name from message history
+      const quoteAuthor = lookupSenderName(quoteAuthorId) || quoteAuthorId;
+      const quoteText = (msg.rawQuote.text as string) || '';
+      quote = { author: quoteAuthor, text: quoteText };
+    }
+
+    // Build reaction
+    let reaction: { emoji: string; targetAuthor: string; targetTimestamp: string } | undefined;
+    if (msg.rawReaction) {
+      const emoji = msg.rawReaction.emoji as string;
+      const isRemove = msg.rawReaction.isRemove as boolean;
+      if (emoji && !isRemove) {
+        const targetAuthor = (msg.rawReaction.targetAuthorNumber as string)
+          || (msg.rawReaction.targetAuthorUuid as string)
+          || (msg.rawReaction.targetAuthor as string)
+          || 'unknown';
+        const targetTs = msg.rawReaction.targetSentTimestamp as number | undefined;
+        reaction = {
+          emoji,
+          targetAuthor,
+          targetTimestamp: targetTs ? new Date(targetTs).toISOString() : '',
+        };
+      }
+    }
+
+    // Build content string with inline metadata (survives DB round-trip)
+    // Message text goes first so trigger patterns can match it
+    const parts: string[] = [];
+
+    // Original message text (first, so @Echo trigger matches)
+    if (msg.message) {
+      parts.push(msg.message);
+    }
+
+    // Quote context (reply-to)
+    if (quote) {
+      const quoteText = quote.text.length > 100
+        ? quote.text.slice(0, 100) + '...'
+        : quote.text;
+      parts.push(`[replying to ${quote.author}: ${quoteText}]`);
+    }
+
+    // Reaction
+    if (reaction) {
+      parts.push(`[reacted ${reaction.emoji} to message from ${reaction.targetAuthor}]`);
+    }
+
+    // Attachment references (file paths the agent can Read inside the container)
+    if (attachments) {
+      for (const att of attachments) {
+        const label = att.filename || att.contentType;
+        parts.push(`[attachment: ${label} → ${att.containerPath}]`);
+      }
+    }
+
+    const content = parts.join('\n');
+
+    // Skip messages with no meaningful content
+    if (!content.trim()) return;
 
     const isBotMessage = msg.isFromMe;
 
@@ -328,10 +448,13 @@ export class SignalChannel implements Channel {
       chat_jid: chatJid,
       sender: msg.sourceId || '',
       sender_name: msg.sourceName,
-      content: msg.message,
+      content,
       timestamp: isoTimestamp,
       is_from_me: msg.isFromMe,
       is_bot_message: isBotMessage,
+      attachments,
+      quote,
+      reaction,
     });
   }
 

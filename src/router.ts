@@ -10,9 +10,36 @@ export function escapeXml(s: string): string {
 }
 
 export function formatMessages(messages: NewMessage[]): string {
-  const lines = messages.map((m) =>
-    `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`,
-  );
+  const lines = messages.map((m) => {
+    // Build attribute string
+    let attrs = `sender="${escapeXml(m.sender_name)}" time="${m.timestamp}"`;
+
+    // Add reply-to context if present
+    if (m.quote) {
+      const quoteText = m.quote.text.length > 100
+        ? m.quote.text.slice(0, 100) + '...'
+        : m.quote.text;
+      attrs += ` replying-to="${escapeXml(m.quote.author)}: ${escapeXml(quoteText)}"`;
+    }
+
+    // Build child elements for attachments
+    let attachmentElements = '';
+    if (m.attachments && m.attachments.length > 0) {
+      attachmentElements = m.attachments
+        .map((a) => {
+          let attAttrs = `type="${escapeXml(a.contentType)}" path="${escapeXml(a.containerPath)}"`;
+          if (a.filename) attAttrs += ` filename="${escapeXml(a.filename)}"`;
+          return `\n  <attachment ${attAttrs} />`;
+        })
+        .join('');
+    }
+
+    const content = escapeXml(m.content);
+    if (attachmentElements) {
+      return `<message ${attrs}>${content}${attachmentElements}\n</message>`;
+    }
+    return `<message ${attrs}>${content}</message>`;
+  });
   return `<messages>\n${lines.join('\n')}\n</messages>`;
 }
 

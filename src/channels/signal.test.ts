@@ -82,13 +82,13 @@ function createTestOpts(overrides?: Partial<SignalChannelOpts>): SignalChannelOp
       'signal:+15559876543': {
         name: 'Signal DM',
         folder: 'signal-dm',
-        trigger: '@Andy',
+        trigger: '@Echo',
         added_at: '2024-01-01T00:00:00.000Z',
       },
       'signal:dGVzdGdyb3VwaWQ=': {
         name: 'Signal Group',
         folder: 'signal-group',
-        trigger: '@Andy',
+        trigger: '@Echo',
         added_at: '2024-01-01T00:00:00.000Z',
       },
     })),
@@ -164,7 +164,7 @@ describe('SignalChannel', () => {
         sourceName: 'Alice',
         timestamp: 1700000000000,
         dataMessage: {
-          message: 'Hello Andy',
+          message: 'Hello Echo',
         },
       });
 
@@ -184,7 +184,7 @@ describe('SignalChannel', () => {
           chat_jid: 'signal:+15559876543',
           sender: '+15559876543',
           sender_name: 'Alice',
-          content: 'Hello Andy',
+          content: 'Hello Echo',
           is_from_me: false,
           is_bot_message: false,
         }),
@@ -376,7 +376,7 @@ describe('SignalChannel', () => {
           'signal:+15551234567': {
             name: 'Note to Self',
             folder: 'note-to-self',
-            trigger: '@Andy',
+            trigger: '@Echo',
             added_at: '2024-01-01T00:00:00.000Z',
           },
         })),

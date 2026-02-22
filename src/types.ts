@@ -41,6 +41,14 @@ export interface RegisteredGroup {
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
 }
 
+export interface Attachment {
+  contentType: string;
+  filename?: string;
+  hostPath: string;
+  containerPath: string;
+  size?: number;
+}
+
 export interface NewMessage {
   id: string;
   chat_jid: string;
@@ -50,6 +58,9 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  attachments?: Attachment[];
+  quote?: { author: string; text: string };
+  reaction?: { emoji: string; targetAuthor: string; targetTimestamp: string };
 }
 
 export interface ScheduledTask {

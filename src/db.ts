@@ -327,6 +327,18 @@ export function getMessagesSince(
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
 }
 
+/**
+ * Look up the most recent sender_name for a given sender ID (UUID or phone number).
+ */
+export function lookupSenderName(senderId: string): string | undefined {
+  const row = db
+    .prepare(
+      'SELECT sender_name FROM messages WHERE sender = ? AND sender_name IS NOT NULL ORDER BY timestamp DESC LIMIT 1',
+    )
+    .get(senderId) as { sender_name: string } | undefined;
+  return row?.sender_name;
+}
+
 export function createTask(
   task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
 ): void {
