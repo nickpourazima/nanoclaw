@@ -80,6 +80,22 @@ function saveState(): void {
   );
 }
 
+function slugifyGroupName(name: string): string {
+  let slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  if (!slug || !/^[a-z0-9]/.test(slug)) slug = 'group-' + slug;
+  const existingFolders = new Set(Object.values(registeredGroups).map(g => g.folder));
+  let candidate = slug;
+  let i = 2;
+  while (existingFolders.has(candidate) || candidate === MAIN_GROUP_FOLDER) {
+    candidate = `${slug}-${i++}`;
+  }
+  return candidate;
+}
+
 function registerGroup(jid: string, group: RegisteredGroup): void {
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
@@ -431,8 +447,19 @@ async function main(): Promise<void> {
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (_chatJid: string, msg: NewMessage) => storeMessage(msg),
-    onChatMetadata: (chatJid: string, timestamp: string, name?: string, channel?: string, isGroup?: boolean) =>
-      storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
+    onChatMetadata: (chatJid: string, timestamp: string, name?: string, channel?: string, isGroup?: boolean) => {
+      storeChatMetadata(chatJid, timestamp, name, channel, isGroup);
+      if (isGroup && !registeredGroups[chatJid]) {
+        const folderName = slugifyGroupName(name || chatJid);
+        registerGroup(chatJid, {
+          name: name || chatJid,
+          folder: folderName,
+          trigger: `@${ASSISTANT_NAME}`,
+          added_at: new Date().toISOString(),
+          requiresTrigger: true,
+        });
+      }
+    },
     registeredGroups: () => registeredGroups,
   };
 
