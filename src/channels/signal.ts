@@ -1,0 +1,341 @@
+import { ChildProcess, spawn } from 'child_process';
+
+import { ASSISTANT_NAME, SIGNAL_CLI_PATH, SIGNAL_PHONE_NUMBER } from '../config.js';
+import { logger } from '../logger.js';
+import { Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
+
+const HEALTH_TIMEOUT_MS = 60000;
+const HEALTH_POLL_MS = 500;
+
+export interface SignalChannelOpts {
+  onMessage: OnInboundMessage;
+  onChatMetadata: OnChatMetadata;
+  registeredGroups: () => Record<string, RegisteredGroup>;
+}
+
+export class SignalChannel implements Channel {
+  name = 'signal';
+
+  private proc: ChildProcess | null = null;
+  private connected = false;
+  private outgoingQueue: Array<{ jid: string; text: string }> = [];
+  private flushing = false;
+  private stdoutBuffer = '';
+  private rpcIdCounter = 0;
+  private pendingRpc = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+
+  private opts: SignalChannelOpts;
+
+  constructor(opts: SignalChannelOpts) {
+    this.opts = opts;
+  }
+
+  async connect(): Promise<void> {
+    this.spawnProcess();
+    await this.waitForHealth();
+    this.connected = true;
+    logger.info('Connected to Signal');
+    this.flushOutgoingQueue().catch((err) =>
+      logger.error({ err }, 'Failed to flush Signal outgoing queue'),
+    );
+  }
+
+  async sendMessage(jid: string, text: string): Promise<void> {
+    const prefixed = `${ASSISTANT_NAME}: ${text}`;
+
+    if (!this.connected) {
+      this.outgoingQueue.push({ jid, text: prefixed });
+      logger.info({ jid, length: prefixed.length, queueSize: this.outgoingQueue.length }, 'Signal disconnected, message queued');
+      return;
+    }
+
+    try {
+      await this.rpcSend(jid, prefixed);
+      logger.info({ jid, length: prefixed.length }, 'Signal message sent');
+    } catch (err) {
+      this.outgoingQueue.push({ jid, text: prefixed });
+      logger.warn({ jid, err, queueSize: this.outgoingQueue.length }, 'Failed to send Signal message, queued');
+    }
+  }
+
+  isConnected(): boolean {
+    return this.connected;
+  }
+
+  ownsJid(jid: string): boolean {
+    return jid.startsWith('signal:');
+  }
+
+  async disconnect(): Promise<void> {
+    this.connected = false;
+    if (this.proc) {
+      this.proc.kill('SIGTERM');
+      this.proc = null;
+    }
+    // Reject any pending RPC calls
+    for (const [, pending] of this.pendingRpc) {
+      pending.reject(new Error('Channel disconnected'));
+    }
+    this.pendingRpc.clear();
+    logger.info('Signal channel disconnected');
+  }
+
+  // --- Private helpers ---
+
+  private spawnProcess(): void {
+    const cliPath = SIGNAL_CLI_PATH;
+    const args = ['-a', SIGNAL_PHONE_NUMBER, '-o', 'json', 'jsonRpc'];
+
+    logger.info({ cmd: cliPath, args }, 'Spawning signal-cli jsonRpc');
+
+    this.proc = spawn(cliPath, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    // Parse JSON-RPC messages from stdout (one per line)
+    this.proc.stdout?.on('data', (data: Buffer) => {
+      this.stdoutBuffer += data.toString();
+      const lines = this.stdoutBuffer.split('\n');
+      this.stdoutBuffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('{')) continue;
+        try {
+          const msg = JSON.parse(trimmed);
+          this.handleJsonRpcMessage(msg);
+        } catch {
+          logger.debug({ line: trimmed.slice(0, 200) }, 'Non-JSON stdout line');
+        }
+      }
+    });
+
+    this.proc.stderr?.on('data', (data: Buffer) => {
+      logger.debug({ source: 'signal-cli' }, data.toString().trim());
+    });
+
+    this.proc.on('exit', (code, signal) => {
+      logger.warn({ code, signal }, 'signal-cli process exited');
+      if (this.connected) {
+        this.connected = false;
+        setTimeout(() => {
+          logger.info('Restarting signal-cli...');
+          this.connect().catch((err) =>
+            logger.error({ err }, 'Failed to restart signal-cli'),
+          );
+        }, 5000);
+      }
+    });
+  }
+
+  private async waitForHealth(): Promise<void> {
+    const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+      try {
+        const result = await this.rpcCall('version', {});
+        if (result) {
+          logger.info({ version: result }, 'signal-cli is healthy');
+          return;
+        }
+      } catch {
+        // Not ready yet
+      }
+      await new Promise((r) => setTimeout(r, HEALTH_POLL_MS));
+    }
+
+    throw new Error(`signal-cli failed to become healthy within ${HEALTH_TIMEOUT_MS}ms`);
+  }
+
+  private handleJsonRpcMessage(msg: Record<string, unknown>): void {
+    // Response to our RPC call
+    if (msg.id && typeof msg.id === 'string') {
+      const pending = this.pendingRpc.get(msg.id);
+      if (pending) {
+        this.pendingRpc.delete(msg.id);
+        if (msg.error) {
+          pending.reject(new Error(JSON.stringify(msg.error)));
+        } else {
+          pending.resolve(msg.result);
+        }
+      }
+      return;
+    }
+
+    // Notification (incoming message): method="receive", params.envelope
+    if (msg.method === 'receive') {
+      const params = msg.params as Record<string, unknown> | undefined;
+      const envelope = params?.envelope as Record<string, unknown> | undefined;
+      if (envelope) {
+        this.handleEnvelope(envelope);
+      }
+    }
+  }
+
+  private handleEnvelope(envelope: Record<string, unknown>): void {
+    const sourceNumber = envelope.sourceNumber as string | undefined;
+    const sourceUuid = (envelope.sourceUuid || envelope.source) as string | undefined;
+    const sourceId = sourceNumber || sourceUuid;
+    const sourceName = (envelope.sourceName as string) || sourceId || 'Unknown';
+    const timestamp = envelope.timestamp as number | undefined;
+
+    // Handle dataMessage (incoming messages from others)
+    const dataMessage = envelope.dataMessage as Record<string, unknown> | undefined;
+    if (dataMessage) {
+      this.processMessage({
+        sourceId,
+        sourceName,
+        timestamp,
+        message: dataMessage.message as string | undefined,
+        groupInfo: dataMessage.groupInfo as Record<string, unknown> | undefined,
+        isFromMe: false,
+      });
+      return;
+    }
+
+    // Handle syncMessage.sentMessage (messages sent from our primary device)
+    const syncMessage = envelope.syncMessage as Record<string, unknown> | undefined;
+    const sentMessage = syncMessage?.sentMessage as Record<string, unknown> | undefined;
+    if (sentMessage) {
+      const destNumber = sentMessage.destinationNumber as string | undefined;
+      const destUuid = (sentMessage.destinationUuid || sentMessage.destination) as string | undefined;
+      // For sync messages, the "chat" is the destination, not the source
+      const chatId = destNumber || destUuid || sourceId;
+      this.processMessage({
+        sourceId: chatId,
+        sourceName,
+        timestamp: sentMessage.timestamp as number | undefined ?? timestamp,
+        message: sentMessage.message as string | undefined,
+        groupInfo: sentMessage.groupInfo as Record<string, unknown> | undefined,
+        isFromMe: true,
+      });
+    }
+  }
+
+  private processMessage(msg: {
+    sourceId: string | undefined;
+    sourceName: string;
+    timestamp: number | undefined;
+    message: string | undefined;
+    groupInfo: Record<string, unknown> | undefined;
+    isFromMe: boolean;
+  }): void {
+    // Determine JID
+    let chatJid: string;
+    let isGroup: boolean;
+
+    if (msg.groupInfo?.groupId) {
+      chatJid = `signal:${msg.groupInfo.groupId}`;
+      isGroup = true;
+    } else if (msg.sourceId) {
+      chatJid = `signal:${msg.sourceId}`;
+      isGroup = false;
+    } else {
+      return;
+    }
+
+    const isoTimestamp = msg.timestamp
+      ? new Date(msg.timestamp).toISOString()
+      : new Date().toISOString();
+
+    // Handle /chatid command
+    if (msg.message && msg.message.trim().toLowerCase() === '/chatid') {
+      this.sendChatIdResponse(chatJid).catch((err) =>
+        logger.warn({ err, chatJid }, 'Failed to send /chatid response'),
+      );
+      return;
+    }
+
+    // Notify metadata for all messages (group discovery)
+    const groupName = msg.groupInfo?.groupName as string | undefined;
+    this.opts.onChatMetadata(chatJid, isoTimestamp, groupName, 'signal', isGroup);
+
+    // Only deliver full messages for registered groups
+    const groups = this.opts.registeredGroups();
+    if (!groups[chatJid]) return;
+
+    if (!msg.message) return;
+
+    const isBotMessage = msg.message.startsWith(`${ASSISTANT_NAME}:`);
+
+    this.opts.onMessage(chatJid, {
+      id: `signal-${msg.timestamp || Date.now()}`,
+      chat_jid: chatJid,
+      sender: msg.sourceId || '',
+      sender_name: msg.sourceName,
+      content: msg.message,
+      timestamp: isoTimestamp,
+      is_from_me: msg.isFromMe,
+      is_bot_message: isBotMessage,
+    });
+  }
+
+  private async sendChatIdResponse(chatJid: string): Promise<void> {
+    const text = `Chat ID: ${chatJid}`;
+    await this.rpcSend(chatJid, text);
+    logger.info({ chatJid }, '/chatid response sent');
+  }
+
+  private async rpcSend(jid: string, text: string): Promise<void> {
+    const target = jid.replace(/^signal:/, '');
+
+    const params: Record<string, unknown> = { message: text };
+    if (target.startsWith('+')) {
+      // Phone number
+      params.recipient = [target];
+    } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target)) {
+      // UUID
+      params.recipient = [target];
+    } else {
+      // Group ID (base64)
+      params.groupId = target;
+    }
+
+    await this.rpcCall('send', params);
+  }
+
+  private rpcCall(method: string, params: Record<string, unknown>): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const id = `rpc-${++this.rpcIdCounter}`;
+      const msg = JSON.stringify({ jsonrpc: '2.0', method, id, params }) + '\n';
+
+      this.pendingRpc.set(id, { resolve, reject });
+
+      if (!this.proc?.stdin?.writable) {
+        this.pendingRpc.delete(id);
+        reject(new Error('signal-cli stdin not writable'));
+        return;
+      }
+
+      this.proc.stdin.write(msg, (err) => {
+        if (err) {
+          this.pendingRpc.delete(id);
+          reject(err);
+        }
+      });
+
+      // Timeout after 30s
+      setTimeout(() => {
+        if (this.pendingRpc.has(id)) {
+          this.pendingRpc.delete(id);
+          reject(new Error(`RPC timeout: ${method}`));
+        }
+      }, 30000);
+    });
+  }
+
+  private async flushOutgoingQueue(): Promise<void> {
+    if (this.flushing || this.outgoingQueue.length === 0) return;
+    this.flushing = true;
+    try {
+      logger.info({ count: this.outgoingQueue.length }, 'Flushing Signal outgoing queue');
+      while (this.outgoingQueue.length > 0) {
+        const item = this.outgoingQueue.shift()!;
+        await this.rpcSend(item.jid, item.text);
+        logger.info({ jid: item.jid, length: item.text.length }, 'Queued Signal message sent');
+      }
+    } finally {
+      this.flushing = false;
+    }
+  }
+}

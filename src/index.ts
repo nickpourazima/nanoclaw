@@ -7,8 +7,11 @@ import {
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  SIGNAL_ONLY,
+  SIGNAL_PHONE_NUMBER,
   TRIGGER_PATTERN,
 } from './config.js';
+import { SignalChannel } from './channels/signal.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import {
   ContainerOutput,
@@ -48,7 +51,7 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
+let whatsapp: WhatsAppChannel | undefined;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -434,9 +437,17 @@ async function main(): Promise<void> {
   };
 
   // Create and connect channels
-  whatsapp = new WhatsAppChannel(channelOpts);
-  channels.push(whatsapp);
-  await whatsapp.connect();
+  if (!SIGNAL_ONLY) {
+    whatsapp = new WhatsAppChannel(channelOpts);
+    channels.push(whatsapp);
+    await whatsapp.connect();
+  }
+
+  if (SIGNAL_PHONE_NUMBER) {
+    const signal = new SignalChannel(channelOpts);
+    channels.push(signal);
+    await signal.connect();
+  }
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({

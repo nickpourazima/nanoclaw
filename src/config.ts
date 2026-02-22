@@ -9,6 +9,9 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'SIGNAL_PHONE_NUMBER',
+  'SIGNAL_CLI_PATH',
+  'SIGNAL_ONLY',
 ]);
 
 export const ASSISTANT_NAME =
@@ -62,6 +65,14 @@ export const TRIGGER_PATTERN = new RegExp(
   `^@${escapeRegex(ASSISTANT_NAME)}\\b`,
   'i',
 );
+
+// Signal channel configuration
+export const SIGNAL_PHONE_NUMBER =
+  process.env.SIGNAL_PHONE_NUMBER || envConfig.SIGNAL_PHONE_NUMBER || '';
+export const SIGNAL_CLI_PATH =
+  process.env.SIGNAL_CLI_PATH || envConfig.SIGNAL_CLI_PATH || 'signal-cli';
+export const SIGNAL_ONLY =
+  (process.env.SIGNAL_ONLY || envConfig.SIGNAL_ONLY) === 'true';
 
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default
