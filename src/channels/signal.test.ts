@@ -5,7 +5,6 @@ import { Writable } from 'stream';
 // --- Mocks ---
 
 vi.mock('../config.js', () => ({
-  ASSISTANT_NAME: 'Andy',
   SIGNAL_PHONE_NUMBER: '+15551234567',
   SIGNAL_CLI_PATH: 'signal-cli',
 }));
@@ -275,17 +274,22 @@ describe('SignalChannel', () => {
       await channel.disconnect();
     });
 
-    it('detects bot messages by prefix', async () => {
+    it('detects bot messages by isFromMe (syncMessage)', async () => {
       const opts = createTestOpts();
       const channel = new SignalChannel(opts);
       await channel.connect();
 
+      // syncMessage.sentMessage → isFromMe = true → is_bot_message = true
       pushReceiveNotification({
-        sourceNumber: '+15559876543',
-        sourceName: 'Alice',
+        sourceNumber: '+15551234567',
+        sourceName: 'Echo',
         timestamp: 1700000000000,
-        dataMessage: {
-          message: 'Andy: This is a bot response',
+        syncMessage: {
+          sentMessage: {
+            destinationNumber: '+15559876543',
+            timestamp: 1700000000000,
+            message: 'Hello from the bot',
+          },
         },
       });
 
@@ -293,7 +297,7 @@ describe('SignalChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'signal:+15559876543',
-        expect.objectContaining({ is_bot_message: true }),
+        expect.objectContaining({ is_bot_message: true, is_from_me: true }),
       );
 
       await channel.disconnect();
@@ -573,7 +577,7 @@ describe('SignalChannel', () => {
       const body = JSON.parse(sendCalls[0]);
       expect(body.method).toBe('send');
       expect(body.params.recipient).toEqual(['+15559876543']);
-      expect(body.params.message).toBe('Andy: Hello');
+      expect(body.params.message).toBe('Hello');
 
       await channel.disconnect();
     });
@@ -589,7 +593,7 @@ describe('SignalChannel', () => {
       expect(sendCalls.length).toBe(1);
       const body = JSON.parse(sendCalls[0]);
       expect(body.params.groupId).toBe('dGVzdGdyb3VwaWQ=');
-      expect(body.params.message).toBe('Andy: Group hello');
+      expect(body.params.message).toBe('Group hello');
 
       await channel.disconnect();
     });
@@ -620,7 +624,7 @@ describe('SignalChannel', () => {
 
       const sendCalls = latestProc.stdinChunks.filter(c => c.includes('"send"'));
       const body = JSON.parse(sendCalls[0]);
-      expect(body.params.message).toBe('Andy: Test message');
+      expect(body.params.message).toBe('Test message');
 
       await channel.disconnect();
     });
@@ -631,8 +635,8 @@ describe('SignalChannel', () => {
 
       // These will fail silently since no process exists yet
       (channel as any).outgoingQueue.push(
-        { jid: 'signal:+15559876543', text: 'Andy: First' },
-        { jid: 'signal:+15559876543', text: 'Andy: Second' },
+        { jid: 'signal:+15559876543', text: 'First' },
+        { jid: 'signal:+15559876543', text: 'Second' },
       );
 
       await channel.connect();
@@ -643,8 +647,8 @@ describe('SignalChannel', () => {
 
       const body1 = JSON.parse(sendCalls[0]);
       const body2 = JSON.parse(sendCalls[1]);
-      expect(body1.params.message).toBe('Andy: First');
-      expect(body2.params.message).toBe('Andy: Second');
+      expect(body1.params.message).toBe('First');
+      expect(body2.params.message).toBe('Second');
 
       await channel.disconnect();
     });
@@ -691,6 +695,135 @@ describe('SignalChannel', () => {
     it('starts disconnected', () => {
       const channel = new SignalChannel(createTestOpts());
       expect(channel.isConnected()).toBe(false);
+    });
+  });
+
+  // --- Security: caps and cleanup ---
+
+  describe('pendingRpc cap', () => {
+    it('rejects new RPC calls when cap is exceeded', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      // Fill up pending RPC map by disabling auto-responses
+      const origWrite = latestProc.stdin.write;
+      latestProc.stdin.write = function(chunk: unknown, ...args: unknown[]) {
+        // Swallow writes so responses never come back, filling up pending map
+        const cb = args.find(a => typeof a === 'function') as ((err?: Error | null) => void) | undefined;
+        if (cb) cb();
+        return true;
+      } as typeof latestProc.stdin.write;
+
+      // Fire 100 RPCs (they'll all be pending since we swallowed stdin)
+      const promises: Promise<unknown>[] = [];
+      for (let i = 0; i < 100; i++) {
+        promises.push(
+          (channel as any).rpcCall('test', {}).catch(() => {}),
+        );
+      }
+
+      // The 101st should be rejected immediately
+      await expect(
+        (channel as any).rpcCall('test', {}),
+      ).rejects.toThrow('RPC cap exceeded');
+
+      latestProc.stdin.write = origWrite;
+      await channel.disconnect();
+    });
+  });
+
+  describe('outgoingQueue cap', () => {
+    it('drops oldest message when queue exceeds cap', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+
+      // Fill queue to cap (1000)
+      const queue = (channel as any).outgoingQueue as Array<{ jid: string; text: string }>;
+      for (let i = 0; i < 1000; i++) {
+        queue.push({ jid: 'signal:+1', text: `msg-${i}` });
+      }
+
+      // Send one more while disconnected
+      await channel.sendMessage('signal:+1', 'overflow');
+
+      expect(queue.length).toBe(1000);
+      // Oldest (msg-0) should have been dropped
+      expect(queue[0].text).toBe('msg-1');
+      expect(queue[queue.length - 1].text).toBe('overflow');
+    });
+  });
+
+  describe('stdoutBuffer cap', () => {
+    it('truncates buffer when exceeding 1MB', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      // Push a massive chunk without newlines to fill the buffer
+      const bigData = 'x'.repeat(1_100_000);
+      latestProc.stdout.emit('data', Buffer.from(bigData));
+
+      // Buffer should be capped at 1MB
+      const buffer = (channel as any).stdoutBuffer as string;
+      expect(buffer.length).toBeLessThanOrEqual(1_000_000);
+
+      await channel.disconnect();
+    });
+  });
+
+  describe('disconnect cleanup', () => {
+    it('resets flushing flag on disconnect', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      (channel as any).flushing = true;
+      await channel.disconnect();
+
+      expect((channel as any).flushing).toBe(false);
+    });
+
+    it('clears stdoutBuffer on disconnect', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      (channel as any).stdoutBuffer = 'some leftover data';
+      await channel.disconnect();
+
+      expect((channel as any).stdoutBuffer).toBe('');
+    });
+
+    it('clears outgoingQueue on disconnect', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      (channel as any).outgoingQueue.push({ jid: 'signal:+1', text: 'pending' });
+      await channel.disconnect();
+
+      expect((channel as any).outgoingQueue).toEqual([]);
+    });
+
+    it('clears pending RPC timeout handles on disconnect', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      // Manually add a pending entry with a timer
+      const rejectFn = vi.fn();
+      const timer = setTimeout(() => {}, 30000);
+      (channel as any).pendingRpc.set('test-rpc', {
+        resolve: vi.fn(),
+        reject: rejectFn,
+        timer,
+      });
+
+      await channel.disconnect();
+
+      expect((channel as any).pendingRpc.size).toBe(0);
+      expect(rejectFn).toHaveBeenCalledWith(expect.any(Error));
     });
   });
 });

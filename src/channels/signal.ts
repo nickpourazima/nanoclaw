@@ -1,11 +1,14 @@
 import { ChildProcess, spawn } from 'child_process';
 
-import { ASSISTANT_NAME, SIGNAL_CLI_PATH, SIGNAL_PHONE_NUMBER } from '../config.js';
+import { SIGNAL_CLI_PATH, SIGNAL_PHONE_NUMBER } from '../config.js';
 import { logger } from '../logger.js';
 import { Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
 
 const HEALTH_TIMEOUT_MS = 60000;
 const HEALTH_POLL_MS = 500;
+const MAX_PENDING_RPC = 100;
+const MAX_OUTGOING_QUEUE = 1000;
+const MAX_STDOUT_BUFFER = 1_000_000; // 1MB
 
 export interface SignalChannelOpts {
   onMessage: OnInboundMessage;
@@ -22,7 +25,11 @@ export class SignalChannel implements Channel {
   private flushing = false;
   private stdoutBuffer = '';
   private rpcIdCounter = 0;
-  private pendingRpc = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private pendingRpc = new Map<string, {
+    resolve: (v: unknown) => void;
+    reject: (e: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
 
   private opts: SignalChannelOpts;
 
@@ -41,9 +48,14 @@ export class SignalChannel implements Channel {
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
-    const prefixed = `${ASSISTANT_NAME}: ${text}`;
+    // Signal bot always has its own identity (contact name), no prefix needed
+    const prefixed = text;
 
     if (!this.connected) {
+      if (this.outgoingQueue.length >= MAX_OUTGOING_QUEUE) {
+        const dropped = this.outgoingQueue.shift();
+        logger.warn({ droppedJid: dropped?.jid, queueSize: this.outgoingQueue.length }, 'Signal outgoing queue full, dropping oldest message');
+      }
       this.outgoingQueue.push({ jid, text: prefixed });
       logger.info({ jid, length: prefixed.length, queueSize: this.outgoingQueue.length }, 'Signal disconnected, message queued');
       return;
@@ -53,6 +65,10 @@ export class SignalChannel implements Channel {
       await this.rpcSend(jid, prefixed);
       logger.info({ jid, length: prefixed.length }, 'Signal message sent');
     } catch (err) {
+      if (this.outgoingQueue.length >= MAX_OUTGOING_QUEUE) {
+        const dropped = this.outgoingQueue.shift();
+        logger.warn({ droppedJid: dropped?.jid, queueSize: this.outgoingQueue.length }, 'Signal outgoing queue full, dropping oldest message');
+      }
       this.outgoingQueue.push({ jid, text: prefixed });
       logger.warn({ jid, err, queueSize: this.outgoingQueue.length }, 'Failed to send Signal message, queued');
     }
@@ -68,12 +84,16 @@ export class SignalChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    this.flushing = false;
+    this.stdoutBuffer = '';
+    this.outgoingQueue = [];
     if (this.proc) {
       this.proc.kill('SIGTERM');
       this.proc = null;
     }
-    // Reject any pending RPC calls
+    // Reject any pending RPC calls and clear their timeouts
     for (const [, pending] of this.pendingRpc) {
+      clearTimeout(pending.timer);
       pending.reject(new Error('Channel disconnected'));
     }
     this.pendingRpc.clear();
@@ -95,6 +115,10 @@ export class SignalChannel implements Channel {
     // Parse JSON-RPC messages from stdout (one per line)
     this.proc.stdout?.on('data', (data: Buffer) => {
       this.stdoutBuffer += data.toString();
+      if (this.stdoutBuffer.length > MAX_STDOUT_BUFFER) {
+        logger.warn({ size: this.stdoutBuffer.length }, 'Signal stdout buffer exceeded cap, truncating');
+        this.stdoutBuffer = this.stdoutBuffer.slice(-MAX_STDOUT_BUFFER);
+      }
       const lines = this.stdoutBuffer.split('\n');
       this.stdoutBuffer = lines.pop() || '';
 
@@ -152,6 +176,7 @@ export class SignalChannel implements Channel {
     if (msg.id && typeof msg.id === 'string') {
       const pending = this.pendingRpc.get(msg.id);
       if (pending) {
+        clearTimeout(pending.timer);
         this.pendingRpc.delete(msg.id);
         if (msg.error) {
           pending.reject(new Error(JSON.stringify(msg.error)));
@@ -256,7 +281,7 @@ export class SignalChannel implements Channel {
 
     if (!msg.message) return;
 
-    const isBotMessage = msg.message.startsWith(`${ASSISTANT_NAME}:`);
+    const isBotMessage = msg.isFromMe;
 
     this.opts.onMessage(chatJid, {
       id: `signal-${msg.timestamp || Date.now()}`,
@@ -296,12 +321,26 @@ export class SignalChannel implements Channel {
 
   private rpcCall(method: string, params: Record<string, unknown>): Promise<unknown> {
     return new Promise((resolve, reject) => {
+      if (this.pendingRpc.size >= MAX_PENDING_RPC) {
+        reject(new Error(`RPC cap exceeded (${MAX_PENDING_RPC} pending calls)`));
+        return;
+      }
+
       const id = `rpc-${++this.rpcIdCounter}`;
       const msg = JSON.stringify({ jsonrpc: '2.0', method, id, params }) + '\n';
 
-      this.pendingRpc.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        const pending = this.pendingRpc.get(id);
+        if (pending) {
+          this.pendingRpc.delete(id);
+          reject(new Error(`RPC timeout: ${method}`));
+        }
+      }, 30000);
+
+      this.pendingRpc.set(id, { resolve, reject, timer });
 
       if (!this.proc?.stdin?.writable) {
+        clearTimeout(timer);
         this.pendingRpc.delete(id);
         reject(new Error('signal-cli stdin not writable'));
         return;
@@ -309,18 +348,11 @@ export class SignalChannel implements Channel {
 
       this.proc.stdin.write(msg, (err) => {
         if (err) {
+          clearTimeout(timer);
           this.pendingRpc.delete(id);
           reject(err);
         }
       });
-
-      // Timeout after 30s
-      setTimeout(() => {
-        if (this.pendingRpc.has(id)) {
-          this.pendingRpc.delete(id);
-          reject(new Error(`RPC timeout: ${method}`));
-        }
-      }, 30000);
     });
   }
 

@@ -357,6 +357,11 @@ export async function processTaskIpc(
         break;
       }
       if (data.jid && data.name && data.folder && data.trigger) {
+        const SAFE_FOLDER_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+        if (!SAFE_FOLDER_RE.test(data.folder)) {
+          logger.warn({ folder: data.folder }, 'Invalid group folder name rejected');
+          break;
+        }
         deps.registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,
