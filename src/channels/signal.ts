@@ -5,7 +5,7 @@ import path from 'path';
 import { ASSISTANT_NAME, SIGNAL_CLI_DIR, SIGNAL_CLI_PATH, SIGNAL_PHONE_NUMBER } from '../config.js';
 import { lookupSenderName } from '../db.js';
 import { logger } from '../logger.js';
-import { transcribeAudioFile } from '../transcription.js';
+import { optimizeImageForVision, transcribeAudioFile } from '../media.js';
 import { Attachment, Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
 
 const HEALTH_TIMEOUT_MS = 120000;
@@ -23,23 +23,32 @@ function resolveMentions(
   text: string | undefined,
   mentions: Array<Record<string, unknown>> | undefined,
 ): string | undefined {
-  if (!text || !mentions || mentions.length === 0) return text;
-
-  // Sort mentions by start position descending so replacements don't shift indices
-  const sorted = [...mentions].sort(
-    (a, b) => (b.start as number) - (a.start as number),
-  );
+  if (!text) return text;
 
   let result = text;
-  for (const mention of sorted) {
-    const start = mention.start as number;
-    const length = (mention.length as number) || 1;
-    const number = mention.number as string | undefined;
-    // Map mentions of our own number to the assistant name so triggers match
-    const name = (number === SIGNAL_PHONE_NUMBER)
-      ? ASSISTANT_NAME
-      : (mention.name as string) || number || 'unknown';
-    result = result.slice(0, start) + `@${name}` + result.slice(start + length);
+
+  if (mentions && mentions.length > 0) {
+    // Sort mentions by start position descending so replacements don't shift indices
+    const sorted = [...mentions].sort(
+      (a, b) => (b.start as number) - (a.start as number),
+    );
+
+    for (const mention of sorted) {
+      const start = mention.start as number;
+      const length = (mention.length as number) || 1;
+      const number = mention.number as string | undefined;
+      // Map mentions of our own number to the assistant name so triggers match
+      const name = (number === SIGNAL_PHONE_NUMBER)
+        ? ASSISTANT_NAME
+        : (mention.name as string) || number || 'unknown';
+      result = result.slice(0, start) + `@${name}` + result.slice(start + length);
+    }
+  }
+
+  // Fallback: signal-cli sometimes omits the mentions array (e.g. with attachments)
+  // but still puts U+FFFC placeholders in the text. Replace any remaining with @ASSISTANT_NAME.
+  if (result.includes('\uFFFC')) {
+    result = result.replace(/\uFFFC/g, `@${ASSISTANT_NAME}`);
   }
 
   return result;
@@ -429,7 +438,7 @@ export class SignalChannel implements Channel {
       parts.push(`[reacted ${reaction.emoji} to message from ${reaction.targetAuthor}]`);
     }
 
-    // Attachment references — transcribe audio, show file path for others
+    // Attachment references — transcribe audio, optimize images, show file path for others
     if (attachments) {
       const kept: Attachment[] = [];
       for (const att of attachments) {
@@ -443,6 +452,9 @@ export class SignalChannel implements Channel {
           } catch (err) {
             logger.warn({ err, file: att.hostPath }, 'Voice transcription failed');
           }
+        }
+        if (att.contentType.startsWith('image/')) {
+          await optimizeImageForVision(att.hostPath);
         }
         const label = att.filename || att.contentType;
         parts.push(`[attachment: ${label} → ${att.containerPath}]`);

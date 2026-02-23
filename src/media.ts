@@ -8,6 +8,10 @@ import { logger } from './logger.js';
 const WHISPER_CLI = path.join(os.homedir(), 'whisper.cpp', 'build', 'bin', 'whisper-cli');
 const WHISPER_MODEL = path.join(os.homedir(), 'whisper.cpp', 'models', 'ggml-base.bin');
 
+// Claude vision: images over 1568px on any edge get downscaled server-side,
+// adding latency. Pre-resize to avoid that overhead.
+const MAX_IMAGE_EDGE = 1568;
+
 /**
  * Transcribe an audio file on disk using local whisper.cpp.
  * Returns the transcript text, or null if transcription is unavailable/fails.
@@ -43,6 +47,45 @@ export async function transcribeAudioFile(filePath: string): Promise<string | nu
   } finally {
     // Clean up temp wav
     try { fs.unlinkSync(wavPath); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Downscale an image if either dimension exceeds MAX_IMAGE_EDGE.
+ * Overwrites the file in place with an optimized JPEG.
+ * Returns true if the image was resized, false if already small enough or on error.
+ */
+export async function optimizeImageForVision(filePath: string): Promise<boolean> {
+  if (!fs.existsSync(filePath)) return false;
+
+  try {
+    // Probe dimensions
+    const probeOut = await exec('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height',
+      '-of', 'csv=p=0',
+      filePath,
+    ]);
+    const [w, h] = probeOut.trim().split(',').map(Number);
+    if (!w || !h || (w <= MAX_IMAGE_EDGE && h <= MAX_IMAGE_EDGE)) return false;
+
+    // Resize preserving aspect ratio, cap longest edge at MAX_IMAGE_EDGE
+    const optimizedPath = filePath + '.optimized.jpg';
+    await exec('ffmpeg', [
+      '-y', '-i', filePath,
+      '-vf', `scale='if(gt(iw,ih),${MAX_IMAGE_EDGE},-2)':'if(gt(ih,iw),${MAX_IMAGE_EDGE},-2)'`,
+      '-q:v', '2',
+      optimizedPath,
+    ]);
+
+    // Replace original with optimized version
+    fs.renameSync(optimizedPath, filePath);
+    logger.info({ file: filePath, original: `${w}x${h}`, maxEdge: MAX_IMAGE_EDGE }, 'Image optimized for vision');
+    return true;
+  } catch (err) {
+    logger.warn({ err, file: filePath }, 'Image optimization failed, using original');
+    return false;
   }
 }
 
