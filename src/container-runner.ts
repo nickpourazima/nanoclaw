@@ -615,6 +615,30 @@ export function writeTasksSnapshot(
   fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
 }
 
+export interface GroupMetadataSnapshot {
+  description: string;
+  members: string[];
+  admins: string[];
+}
+
+/**
+ * Write Signal group metadata snapshot for the container to read.
+ * Lets the agent see group description, member list, and admins.
+ */
+export function writeGroupMetadataSnapshot(
+  groupFolder: string,
+  metadata: GroupMetadataSnapshot | undefined,
+): void {
+  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+
+  const metadataFile = path.join(groupIpcDir, 'group_metadata.json');
+  fs.writeFileSync(
+    metadataFile,
+    JSON.stringify(metadata || { description: '', members: [], admins: [] }, null, 2),
+  );
+}
+
 export interface AvailableGroup {
   jid: string;
   name: string;

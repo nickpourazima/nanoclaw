@@ -16,6 +16,7 @@ import { WhatsAppChannel } from './channels/whatsapp.js';
 import {
   ContainerOutput,
   runContainerAgent,
+  writeGroupMetadataSnapshot,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -199,6 +200,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
+        // Clear typing before sending so indicator stops as message arrives
+        await channel.setTyping?.(chatJid, false);
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
@@ -268,6 +271,19 @@ async function runAgent(
     availableGroups,
     new Set(Object.keys(registeredGroups)),
   );
+
+  // Write Signal group metadata if this is a Signal group
+  if (chatJid.startsWith('signal:')) {
+    const signalChannel = channels.find(c => c.name === 'signal') as SignalChannel | undefined;
+    if (signalChannel) {
+      const metadata = signalChannel.getGroupMetadata(chatJid);
+      writeGroupMetadataSnapshot(group.folder, metadata ? {
+        description: metadata.description,
+        members: metadata.members,
+        admins: metadata.admins,
+      } : undefined);
+    }
+  }
 
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput

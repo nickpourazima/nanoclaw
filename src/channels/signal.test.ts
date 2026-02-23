@@ -9,6 +9,10 @@ vi.mock('../config.js', () => ({
   SIGNAL_CLI_PATH: 'signal-cli',
 }));
 
+vi.mock('../db.js', () => ({
+  lookupSenderName: vi.fn(() => null),
+}));
+
 vi.mock('../logger.js', () => ({
   logger: {
     debug: vi.fn(),
@@ -19,6 +23,9 @@ vi.mock('../logger.js', () => ({
 }));
 
 let latestProc: ReturnType<typeof createFakeProcess>;
+
+/** Custom RPC response handlers keyed by method name */
+let rpcResponseOverrides: Record<string, unknown> = {};
 
 function createFakeProcess() {
   const stdout = new EventEmitter();
@@ -33,13 +40,19 @@ function createFakeProcess() {
         try {
           const req = JSON.parse(line);
           if (req.id) {
-            // Respond with success
+            // Check for custom response override
+            let result: unknown;
+            if (req.method in rpcResponseOverrides) {
+              result = rpcResponseOverrides[req.method];
+            } else if (req.method === 'version') {
+              result = { version: '0.13.24' };
+            } else {
+              result = { timestamp: Date.now(), results: [] };
+            }
             const response: Record<string, unknown> = {
               jsonrpc: '2.0',
               id: req.id,
-              result: req.method === 'version'
-                ? { version: '0.13.24' }
-                : { timestamp: Date.now(), results: [] },
+              result,
             };
             // Emit response on stdout after microtask
             queueMicrotask(() => {
@@ -111,6 +124,7 @@ function pushReceiveNotification(envelope: Record<string, unknown>) {
 describe('SignalChannel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    rpcResponseOverrides = {};
   });
 
   afterEach(() => {
@@ -772,6 +786,155 @@ describe('SignalChannel', () => {
     });
   });
 
+  // --- setTyping ---
+
+  describe('setTyping', () => {
+    it('sends sendTyping RPC for DMs', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      await channel.setTyping('signal:+15559876543', true);
+      await new Promise((r) => setTimeout(r, 10));
+
+      const typingCalls = latestProc.stdinChunks.filter(c => c.includes('"sendTyping"'));
+      expect(typingCalls.length).toBe(1);
+      const body = JSON.parse(typingCalls[0]);
+      expect(body.method).toBe('sendTyping');
+      expect(body.params.recipient).toBe('+15559876543');
+
+      await channel.setTyping('signal:+15559876543', false);
+      await channel.disconnect();
+    });
+
+    it('sends sendTyping RPC for groups', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      await channel.setTyping('signal:dGVzdGdyb3VwaWQ=', true);
+      await new Promise((r) => setTimeout(r, 10));
+
+      const typingCalls = latestProc.stdinChunks.filter(c => c.includes('"sendTyping"'));
+      expect(typingCalls.length).toBe(1);
+      const body = JSON.parse(typingCalls[0]);
+      expect(body.method).toBe('sendTyping');
+      expect(body.params.groupId).toBe('dGVzdGdyb3VwaWQ=');
+
+      await channel.setTyping('signal:dGVzdGdyb3VwaWQ=', false);
+      await channel.disconnect();
+    });
+
+    it('setTyping(false) sends stop-typing RPC', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      const chunksBefore = latestProc.stdinChunks.length;
+      await channel.setTyping('signal:+15559876543', false);
+      await new Promise((r) => setTimeout(r, 10));
+
+      const newTypingCalls = latestProc.stdinChunks.slice(chunksBefore)
+        .filter(c => c.includes('"sendTyping"'));
+      expect(newTypingCalls.length).toBe(1);
+      const body = JSON.parse(newTypingCalls[0]);
+      expect(body.params.stop).toBe(true);
+      expect(body.params.recipient).toBe('+15559876543');
+
+      await channel.disconnect();
+    });
+
+    it('does not throw when disconnected', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+
+      // Should not throw even though channel is not connected
+      await expect(channel.setTyping('signal:+15559876543', true)).resolves.toBeUndefined();
+    });
+
+    it('clears resend interval on setTyping(false)', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      await channel.setTyping('signal:+15559876543', true);
+      expect((channel as any).typingIntervals.size).toBe(1);
+      expect((channel as any).typingTimeouts.size).toBe(1);
+
+      await channel.setTyping('signal:+15559876543', false);
+      expect((channel as any).typingIntervals.size).toBe(0);
+      expect((channel as any).typingTimeouts.size).toBe(0);
+
+      await channel.disconnect();
+    });
+
+    it('auto-clears typing after safety timeout', async () => {
+      vi.useFakeTimers();
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      await channel.setTyping('signal:+15559876543', true);
+      expect((channel as any).typingIntervals.size).toBe(1);
+
+      // Advance past the 120s safety timeout
+      vi.advanceTimersByTime(120_000);
+
+      expect((channel as any).typingIntervals.size).toBe(0);
+      expect((channel as any).typingTimeouts.size).toBe(0);
+
+      vi.useRealTimers();
+      await channel.disconnect();
+    });
+  });
+
+  // --- Group metadata ---
+
+  describe('group metadata', () => {
+    it('fetchGroupMetadata parses listGroups response and populates cache', async () => {
+      rpcResponseOverrides['listGroups'] = [
+        {
+          id: 'dGVzdGdyb3VwaWQ=',
+          name: 'Test Group',
+          description: 'A test group',
+          members: [
+            { number: '+15559876543', uuid: 'uuid-1' },
+            { number: null, uuid: 'uuid-2' },
+          ],
+          admins: [
+            { number: '+15559876543', uuid: 'uuid-1' },
+          ],
+        },
+      ];
+
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+      // Wait for non-blocking fetchGroupMetadata to complete
+      await new Promise((r) => setTimeout(r, 50));
+
+      const metadata = channel.getGroupMetadata('signal:dGVzdGdyb3VwaWQ=');
+      expect(metadata).toBeDefined();
+      expect(metadata!.name).toBe('Test Group');
+      expect(metadata!.description).toBe('A test group');
+      expect(metadata!.members).toEqual(['+15559876543', 'uuid-2']);
+      expect(metadata!.admins).toEqual(['+15559876543']);
+
+      await channel.disconnect();
+    });
+
+    it('getGroupMetadata returns undefined for unknown groups', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(channel.getGroupMetadata('signal:unknown')).toBeUndefined();
+
+      await channel.disconnect();
+    });
+  });
+
   describe('disconnect cleanup', () => {
     it('resets flushing flag on disconnect', async () => {
       const opts = createTestOpts();
@@ -804,6 +967,20 @@ describe('SignalChannel', () => {
       await channel.disconnect();
 
       expect((channel as any).outgoingQueue).toEqual([]);
+    });
+
+    it('clears typing intervals and safety timeouts on disconnect', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(opts);
+      await channel.connect();
+
+      await channel.setTyping('signal:+15559876543', true);
+      expect((channel as any).typingIntervals.size).toBe(1);
+      expect((channel as any).typingTimeouts.size).toBe(1);
+
+      await channel.disconnect();
+      expect((channel as any).typingIntervals.size).toBe(0);
+      expect((channel as any).typingTimeouts.size).toBe(0);
     });
 
     it('clears pending RPC timeout handles on disconnect', async () => {

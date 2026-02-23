@@ -13,6 +13,8 @@ const HEALTH_POLL_MS = 500;
 const MAX_PENDING_RPC = 100;
 const MAX_OUTGOING_QUEUE = 1000;
 const MAX_STDOUT_BUFFER = 1_000_000; // 1MB
+const TYPING_RESEND_MS = 10_000; // Re-send typing every 10s (Signal auto-expires at ~15s)
+const TYPING_MAX_MS = 120_000; // Safety: auto-clear typing after 2 min
 
 /**
  * Replace U+FFFC mention placeholders with @name text.
@@ -60,6 +62,14 @@ export interface SignalChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
+export interface SignalGroupMetadata {
+  id: string;
+  name: string;
+  description: string;
+  members: string[];
+  admins: string[];
+}
+
 export class SignalChannel implements Channel {
   name = 'signal';
 
@@ -76,6 +86,9 @@ export class SignalChannel implements Channel {
   }>();
 
   private opts: SignalChannelOpts;
+  private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
+  private typingTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  private groupMetadata = new Map<string, SignalGroupMetadata>();
 
   constructor(opts: SignalChannelOpts) {
     this.opts = opts;
@@ -98,6 +111,67 @@ export class SignalChannel implements Channel {
     this.flushOutgoingQueue().catch((err) =>
       logger.error({ err }, 'Failed to flush Signal outgoing queue'),
     );
+    this.fetchGroupMetadata().catch((err) =>
+      logger.debug({ err }, 'Failed to fetch Signal group metadata'),
+    );
+  }
+
+  async setTyping(jid: string, isTyping: boolean): Promise<void> {
+    // Clear any existing resend interval and safety timeout for this JID
+    const existing = this.typingIntervals.get(jid);
+    if (existing) {
+      clearInterval(existing);
+      this.typingIntervals.delete(jid);
+    }
+    const existingTimeout = this.typingTimeouts.get(jid);
+    if (existingTimeout) {
+      clearTimeout(existingTimeout);
+      this.typingTimeouts.delete(jid);
+    }
+
+    if (!this.connected) return;
+
+    const target = jid.replace(/^signal:/, '');
+    const targetParams: Record<string, unknown> = {};
+    if (target.startsWith('+') || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target)) {
+      targetParams.recipient = target;
+    } else {
+      targetParams.groupId = target;
+    }
+
+    if (!isTyping) {
+      // Explicitly tell Signal to stop showing the typing indicator
+      this.rpcCall('sendTyping', { ...targetParams, stop: true }).catch((err) =>
+        logger.debug({ err, jid }, 'Failed to send stop-typing indicator'),
+      );
+      return;
+    }
+
+    const sendOnce = () => {
+      this.rpcCall('sendTyping', { ...targetParams }).catch((err) =>
+        logger.debug({ err, jid }, 'Failed to send typing indicator'),
+      );
+    };
+
+    sendOnce();
+    // Re-send every 10s to keep indicator alive during long agent runs
+    this.typingIntervals.set(jid, setInterval(sendOnce, TYPING_RESEND_MS));
+
+    // Safety: auto-clear after max duration to prevent stuck indicators.
+    // The message loop piping path can set typing without a paired false,
+    // and the container may idle for up to 30 min before exiting.
+    this.typingTimeouts.set(jid, setTimeout(() => {
+      const interval = this.typingIntervals.get(jid);
+      if (interval) {
+        clearInterval(interval);
+        this.typingIntervals.delete(jid);
+      }
+      this.typingTimeouts.delete(jid);
+    }, TYPING_MAX_MS));
+  }
+
+  getGroupMetadata(jid: string): SignalGroupMetadata | undefined {
+    return this.groupMetadata.get(jid);
   }
 
   async sendMessage(jid: string, text: string, attachments?: string[]): Promise<void> {
@@ -140,6 +214,15 @@ export class SignalChannel implements Channel {
     this.flushing = false;
     this.stdoutBuffer = '';
     this.outgoingQueue = [];
+    // Clear all typing resend intervals and safety timeouts
+    for (const [, interval] of this.typingIntervals) {
+      clearInterval(interval);
+    }
+    this.typingIntervals.clear();
+    for (const [, timeout] of this.typingTimeouts) {
+      clearTimeout(timeout);
+    }
+    this.typingTimeouts.clear();
     if (this.proc) {
       this.proc.kill('SIGTERM');
       this.proc = null;
@@ -548,6 +631,40 @@ export class SignalChannel implements Channel {
         }
       });
     });
+  }
+
+  private async fetchGroupMetadata(): Promise<void> {
+    const result = await this.rpcCall('listGroups', {}) as Array<Record<string, unknown>> | undefined;
+    if (!Array.isArray(result)) return;
+
+    for (const group of result) {
+      const id = group.id as string | undefined;
+      const name = (group.name as string) || '';
+      if (!id) continue;
+
+      const jid = `signal:${id}`;
+      const description = (group.description as string) || '';
+
+      // Resolve member identifier: prefer phone number, fall back to
+      // DB-stored sender name for the UUID, then raw UUID.
+      const resolveMember = (m: Record<string, unknown>): string => {
+        if (m.number && typeof m.number === 'string') return m.number;
+        const uuid = m.uuid as string | undefined;
+        if (uuid) return lookupSenderName(uuid) || uuid;
+        return 'unknown';
+      };
+
+      // signal-cli returns members[] and admins[] as separate arrays
+      const membersList = group.members as Array<Record<string, unknown>> | undefined;
+      const members = Array.isArray(membersList) ? membersList.map(resolveMember) : [];
+
+      const adminsList = group.admins as Array<Record<string, unknown>> | undefined;
+      const admins = Array.isArray(adminsList) ? adminsList.map(resolveMember) : [];
+
+      this.groupMetadata.set(jid, { id, name, description, members, admins });
+    }
+
+    logger.info({ count: this.groupMetadata.size }, 'Signal group metadata loaded');
   }
 
   private async flushOutgoingQueue(): Promise<void> {

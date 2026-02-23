@@ -278,6 +278,46 @@ Use available_groups.json to find the JID for a group. The folder name should be
   },
 );
 
+server.tool(
+  'get_group_info',
+  'Get information about the current Signal group: description, member list, and admins. Returns empty data for non-Signal groups or when metadata is unavailable.',
+  {},
+  async () => {
+    const metadataFile = path.join(IPC_DIR, 'group_metadata.json');
+
+    try {
+      if (!fs.existsSync(metadataFile)) {
+        return { content: [{ type: 'text' as const, text: 'No group metadata available (not a Signal group or metadata not yet loaded).' }] };
+      }
+
+      const metadata = JSON.parse(fs.readFileSync(metadataFile, 'utf-8'));
+      const parts: string[] = [];
+
+      if (metadata.description) {
+        parts.push(`Description: ${metadata.description}`);
+      }
+
+      if (metadata.members?.length > 0) {
+        parts.push(`Members (${metadata.members.length}): ${metadata.members.join(', ')}`);
+      }
+
+      if (metadata.admins?.length > 0) {
+        parts.push(`Admins: ${metadata.admins.join(', ')}`);
+      }
+
+      if (parts.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'Group metadata is empty (no description, members, or admins).' }] };
+      }
+
+      return { content: [{ type: 'text' as const, text: parts.join('\n') }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error reading group metadata: ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
