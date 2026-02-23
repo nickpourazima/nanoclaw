@@ -5,6 +5,7 @@ import path from 'path';
 import { ASSISTANT_NAME, SIGNAL_CLI_DIR, SIGNAL_CLI_PATH, SIGNAL_PHONE_NUMBER } from '../config.js';
 import { lookupSenderName } from '../db.js';
 import { logger } from '../logger.js';
+import { transcribeAudioFile } from '../transcription.js';
 import { Attachment, Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
 
 const HEALTH_TIMEOUT_MS = 120000;
@@ -268,7 +269,7 @@ export class SignalChannel implements Channel {
         rawAttachments: dataMessage.attachments as Array<Record<string, unknown>> | undefined,
         rawQuote: dataMessage.quote as Record<string, unknown> | undefined,
         rawReaction: dataMessage.reaction as Record<string, unknown> | undefined,
-      });
+      }).catch((err) => logger.error({ err }, 'processMessage failed'));
       return;
     }
 
@@ -290,11 +291,11 @@ export class SignalChannel implements Channel {
         rawAttachments: sentMessage.attachments as Array<Record<string, unknown>> | undefined,
         rawQuote: sentMessage.quote as Record<string, unknown> | undefined,
         rawReaction: sentMessage.reaction as Record<string, unknown> | undefined,
-      });
+      }).catch((err) => logger.error({ err }, 'processMessage failed'));
     }
   }
 
-  private processMessage(msg: {
+  private async processMessage(msg: {
     sourceId: string | undefined;
     sourceName: string;
     timestamp: number | undefined;
@@ -304,7 +305,7 @@ export class SignalChannel implements Channel {
     rawAttachments?: Array<Record<string, unknown>>;
     rawQuote?: Record<string, unknown>;
     rawReaction?: Record<string, unknown>;
-  }): void {
+  }): Promise<void> {
     // Determine JID
     let chatJid: string;
     let isGroup: boolean;
@@ -428,12 +429,26 @@ export class SignalChannel implements Channel {
       parts.push(`[reacted ${reaction.emoji} to message from ${reaction.targetAuthor}]`);
     }
 
-    // Attachment references (file paths the agent can Read inside the container)
+    // Attachment references — transcribe audio, show file path for others
     if (attachments) {
+      const kept: Attachment[] = [];
       for (const att of attachments) {
+        if (att.contentType.startsWith('audio/')) {
+          try {
+            const transcript = await transcribeAudioFile(att.hostPath);
+            if (transcript) {
+              parts.push(`@${ASSISTANT_NAME} [Voice: ${transcript}]`);
+              continue; // transcribed — don't pass attachment to agent
+            }
+          } catch (err) {
+            logger.warn({ err, file: att.hostPath }, 'Voice transcription failed');
+          }
+        }
         const label = att.filename || att.contentType;
         parts.push(`[attachment: ${label} → ${att.containerPath}]`);
+        kept.push(att);
       }
+      attachments = kept.length > 0 ? kept : undefined;
     }
 
     const content = parts.join('\n');
