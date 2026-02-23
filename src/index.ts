@@ -10,6 +10,8 @@ import {
   SIGNAL_ONLY,
   SIGNAL_PHONE_NUMBER,
   TRIGGER_PATTERN,
+  WEBHOOK_PORT,
+  WEBHOOK_SECRET,
 } from './config.js';
 import { SignalChannel } from './channels/signal.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
@@ -41,6 +43,7 @@ import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { startWebhookServer } from './webhook.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -514,12 +517,37 @@ async function main(): Promise<void> {
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text, attachments);
     },
+    sendReaction: (jid, emoji, targetAuthor, targetTimestamp) => {
+      const channel = findChannel(channels, jid);
+      if (!channel?.sendReaction) throw new Error(`No channel with reaction support for JID: ${jid}`);
+      return channel.sendReaction(jid, emoji, targetAuthor, targetTimestamp);
+    },
+    sendReply: (jid, text, targetAuthor, targetTimestamp, attachments) => {
+      const channel = findChannel(channels, jid);
+      if (!channel?.sendReply) {
+        // Fall back to regular message if channel doesn't support replies
+        if (!channel) throw new Error(`No channel for JID: ${jid}`);
+        return channel.sendMessage(jid, text, attachments);
+      }
+      return channel.sendReply(jid, text, targetAuthor, targetTimestamp, attachments);
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
   });
+  // Start webhook server if configured
+  if (WEBHOOK_PORT > 0) {
+    if (!WEBHOOK_SECRET) {
+      logger.warn('WEBHOOK_PORT is set but WEBHOOK_SECRET is empty — webhook server disabled');
+    } else {
+      startWebhookServer(WEBHOOK_PORT, WEBHOOK_SECRET, {
+        registeredGroups: () => registeredGroups,
+      });
+    }
+  }
+
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {

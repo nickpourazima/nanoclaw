@@ -89,6 +89,7 @@ export class SignalChannel implements Channel {
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
   private typingTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
   private groupMetadata = new Map<string, SignalGroupMetadata>();
+  private metadataRetryInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: SignalChannelOpts) {
     this.opts = opts;
@@ -111,9 +112,10 @@ export class SignalChannel implements Channel {
     this.flushOutgoingQueue().catch((err) =>
       logger.error({ err }, 'Failed to flush Signal outgoing queue'),
     );
-    this.fetchGroupMetadata().catch((err) =>
-      logger.debug({ err }, 'Failed to fetch Signal group metadata'),
-    );
+    this.fetchGroupMetadata().catch((err) => {
+      logger.debug({ err }, 'Failed to fetch Signal group metadata, will retry every 5 min');
+      this.startMetadataRetry();
+    });
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
@@ -174,6 +176,57 @@ export class SignalChannel implements Channel {
     return this.groupMetadata.get(jid);
   }
 
+  async sendReaction(jid: string, emoji: string, targetAuthor: string, targetTimestamp: number): Promise<void> {
+    if (!this.connected) {
+      logger.warn({ jid, emoji }, 'Signal disconnected, reaction dropped');
+      return;
+    }
+
+    const target = jid.replace(/^signal:/, '');
+    const params: Record<string, unknown> = {
+      emoji,
+      targetAuthor,
+      targetTimestamp,
+    };
+
+    if (target.startsWith('+') || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target)) {
+      params.recipient = [target];
+    } else {
+      params.groupId = target;
+    }
+
+    try {
+      await this.rpcCall('sendReaction', params);
+      logger.info({ jid, emoji, targetTimestamp }, 'Signal reaction sent');
+    } catch (err) {
+      logger.warn({ jid, emoji, err }, 'Failed to send Signal reaction');
+    }
+  }
+
+  async sendReply(jid: string, text: string, targetAuthor: string, targetTimestamp: number, attachments?: string[]): Promise<void> {
+    if (!this.connected) {
+      if (this.outgoingQueue.length >= MAX_OUTGOING_QUEUE) {
+        const dropped = this.outgoingQueue.shift();
+        logger.warn({ droppedJid: dropped?.jid, queueSize: this.outgoingQueue.length }, 'Signal outgoing queue full, dropping oldest message');
+      }
+      this.outgoingQueue.push({ jid, text, attachments });
+      logger.info({ jid, length: text.length, queueSize: this.outgoingQueue.length }, 'Signal disconnected, reply queued (without quote)');
+      return;
+    }
+
+    try {
+      await this.rpcSend(jid, text, attachments, { timestamp: targetTimestamp, author: targetAuthor });
+      logger.info({ jid, length: text.length, targetTimestamp }, 'Signal reply sent');
+    } catch (err) {
+      if (this.outgoingQueue.length >= MAX_OUTGOING_QUEUE) {
+        const dropped = this.outgoingQueue.shift();
+        logger.warn({ droppedJid: dropped?.jid, queueSize: this.outgoingQueue.length }, 'Signal outgoing queue full, dropping oldest message');
+      }
+      this.outgoingQueue.push({ jid, text, attachments });
+      logger.warn({ jid, err, queueSize: this.outgoingQueue.length }, 'Failed to send Signal reply, queued (without quote)');
+    }
+  }
+
   async sendMessage(jid: string, text: string, attachments?: string[]): Promise<void> {
     // Signal bot always has its own identity (contact name), no prefix needed
     const prefixed = text;
@@ -223,6 +276,10 @@ export class SignalChannel implements Channel {
       clearTimeout(timeout);
     }
     this.typingTimeouts.clear();
+    if (this.metadataRetryInterval) {
+      clearInterval(this.metadataRetryInterval);
+      this.metadataRetryInterval = null;
+    }
     if (this.proc) {
       this.proc.kill('SIGTERM');
       this.proc = null;
@@ -574,7 +631,7 @@ export class SignalChannel implements Channel {
     logger.info({ chatJid }, '/chatid response sent');
   }
 
-  private async rpcSend(jid: string, text: string, attachments?: string[]): Promise<void> {
+  private async rpcSend(jid: string, text: string, attachments?: string[], quote?: { timestamp: number; author: string }): Promise<void> {
     const target = jid.replace(/^signal:/, '');
 
     const params: Record<string, unknown> = { message: text };
@@ -591,6 +648,11 @@ export class SignalChannel implements Channel {
 
     if (attachments && attachments.length > 0) {
       params.attachment = attachments;
+    }
+
+    if (quote) {
+      params.quoteTimestamp = quote.timestamp;
+      params.quoteAuthor = quote.author;
     }
 
     await this.rpcCall('send', params);
@@ -665,6 +727,22 @@ export class SignalChannel implements Channel {
     }
 
     logger.info({ count: this.groupMetadata.size }, 'Signal group metadata loaded');
+  }
+
+  private startMetadataRetry(): void {
+    if (this.metadataRetryInterval) return;
+    this.metadataRetryInterval = setInterval(async () => {
+      try {
+        await this.fetchGroupMetadata();
+        logger.info('Signal group metadata loaded on retry');
+        if (this.metadataRetryInterval) {
+          clearInterval(this.metadataRetryInterval);
+          this.metadataRetryInterval = null;
+        }
+      } catch {
+        logger.debug('Signal group metadata retry failed, will try again');
+      }
+    }, 5 * 60 * 1000); // 5 minutes
   }
 
   private async flushOutgoingQueue(): Promise<void> {

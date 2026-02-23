@@ -12,6 +12,8 @@ const envConfig = readEnvFile([
   'SIGNAL_PHONE_NUMBER',
   'SIGNAL_CLI_PATH',
   'SIGNAL_ONLY',
+  'WEBHOOK_PORT',
+  'WEBHOOK_SECRET',
 ]);
 
 export const ASSISTANT_NAME =
@@ -78,6 +80,10 @@ export const SIGNAL_ONLY =
 export const SIGNAL_CLI_DIR = SIGNAL_PHONE_NUMBER
   ? path.join(os.homedir(), '.local', 'share', 'signal-cli')
   : '';
+
+// Webhook server (disabled by default, set WEBHOOK_PORT to enable)
+export const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT || envConfig.WEBHOOK_PORT || '0', 10);
+export const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || envConfig.WEBHOOK_SECRET || '';
 
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default

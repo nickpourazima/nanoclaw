@@ -14,6 +14,12 @@ export function formatMessages(messages: NewMessage[]): string {
     // Build attribute string
     let attrs = `sender="${escapeXml(m.sender_name)}" time="${m.timestamp}"`;
 
+    // Add msg-id for Signal messages (enables reactions and replies)
+    if (m.id.startsWith('signal-') && m.sender) {
+      const timestamp = m.id.slice('signal-'.length);
+      attrs += ` msg-id="${timestamp}:${escapeXml(m.sender)}"`;
+    }
+
     // Add reply-to context if present
     if (m.quote) {
       const quoteText = m.quote.text.length > 100

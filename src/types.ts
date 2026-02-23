@@ -98,6 +98,10 @@ export interface Channel {
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // Optional: react to a specific message with an emoji.
+  sendReaction?(jid: string, emoji: string, targetAuthor: string, targetTimestamp: number): Promise<void>;
+  // Optional: reply/quote a specific message.
+  sendReply?(jid: string, text: string, targetAuthor: string, targetTimestamp: number, attachments?: string[]): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

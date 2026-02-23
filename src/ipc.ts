@@ -18,6 +18,8 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string, attachments?: string[]) => Promise<void>;
+  sendReaction: (jid: string, emoji: string, targetAuthor: string, targetTimestamp: number) => Promise<void>;
+  sendReply: (jid: string, text: string, targetAuthor: string, targetTimestamp: number, attachments?: string[]) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -156,28 +158,41 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
+              if (data.chatJid) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
+                const authorized = isMain || (targetGroup && targetGroup.folder === sourceGroup);
+
+                if (!authorized) {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup, type: data.type },
+                    'Unauthorized IPC message attempt blocked',
+                  );
+                } else if (data.type === 'reaction' && data.emoji && data.targetAuthor && data.targetTimestamp) {
+                  await deps.sendReaction(data.chatJid, data.emoji, data.targetAuthor, data.targetTimestamp);
+                  logger.info(
+                    { chatJid: data.chatJid, sourceGroup, emoji: data.emoji },
+                    'IPC reaction sent',
+                  );
+                } else if (data.type === 'message' && data.text) {
                   const hostAttachments = resolveAttachmentPaths(
                     data.attachments,
                     sourceGroup,
                     registeredGroups,
                   );
-                  await deps.sendMessage(data.chatJid, data.text, hostAttachments);
-                  logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'IPC message sent',
-                  );
-                } else {
-                  logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'Unauthorized IPC message attempt blocked',
-                  );
+                  if (data.replyToTimestamp && data.replyToAuthor) {
+                    await deps.sendReply(data.chatJid, data.text, data.replyToAuthor, data.replyToTimestamp, hostAttachments);
+                    logger.info(
+                      { chatJid: data.chatJid, sourceGroup, replyTo: data.replyToTimestamp },
+                      'IPC reply sent',
+                    );
+                  } else {
+                    await deps.sendMessage(data.chatJid, data.text, hostAttachments);
+                    logger.info(
+                      { chatJid: data.chatJid, sourceGroup },
+                      'IPC message sent',
+                    );
+                  }
                 }
               }
               fs.unlinkSync(filePath);

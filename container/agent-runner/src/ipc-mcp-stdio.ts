@@ -48,6 +48,9 @@ server.tool(
       'File paths to send as attachments (e.g. screenshots, images). Use absolute paths like /workspace/group/screenshot.png',
     ),
     sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
+    reply_to_msg_id: z.string().optional().describe(
+      'Quote-reply to a specific message. Use the msg-id attribute from the message XML (format: "timestamp:sender"). The reply will appear as a quoted reply in Signal.',
+    ),
   },
   async (args) => {
     const data: Record<string, unknown> = {
@@ -60,9 +63,60 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
 
+    // Parse reply_to_msg_id into target fields for the host IPC handler
+    if (args.reply_to_msg_id) {
+      const colonIdx = args.reply_to_msg_id.indexOf(':');
+      if (colonIdx > 0) {
+        data.replyToTimestamp = parseInt(args.reply_to_msg_id.slice(0, colonIdx), 10);
+        data.replyToAuthor = args.reply_to_msg_id.slice(colonIdx + 1);
+      }
+    }
+
     writeIpcFile(MESSAGES_DIR, data);
 
     return { content: [{ type: 'text' as const, text: 'Message sent.' }] };
+  },
+);
+
+server.tool(
+  'send_reaction',
+  'React to a specific message with an emoji. Use the msg-id attribute from the message XML to identify the target message.',
+  {
+    emoji: z.string().describe('A single emoji to react with (e.g. "👍", "❤️", "😂")'),
+    msg_id: z.string().describe('The msg-id attribute from the target message (format: "timestamp:sender")'),
+  },
+  async (args) => {
+    const colonIdx = args.msg_id.indexOf(':');
+    if (colonIdx <= 0) {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid msg_id format. Expected "timestamp:sender".' }],
+        isError: true,
+      };
+    }
+
+    const targetTimestamp = parseInt(args.msg_id.slice(0, colonIdx), 10);
+    const targetAuthor = args.msg_id.slice(colonIdx + 1);
+
+    if (isNaN(targetTimestamp)) {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid timestamp in msg_id.' }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'reaction',
+      chatJid,
+      emoji: args.emoji,
+      targetAuthor,
+      targetTimestamp,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: `Reaction ${args.emoji} sent.` }] };
   },
 );
 
