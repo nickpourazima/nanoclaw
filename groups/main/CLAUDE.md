@@ -28,7 +28,7 @@ If part of your output is internal reasoning rather than something for the user,
 Here are the key findings from the research...
 ```
 
-Text inside `<internal>` tags is logged but not sent to the user. If you've already sent the key information via `send_message`, you can wrap the recap in `<internal>` to avoid sending it again.
+Text inside `<internal>` tags is logged but not sent to the user. IMPORTANT: If you already sent a message via `send_message`, you MUST wrap your entire final output in `<internal>` tags. Otherwise the user receives a redundant duplicate message like "Sent!" or "Done!". Your final output is ALWAYS sent to the chat — there is no way to return silently except via `<internal>`.
 
 ### Sub-agents and teammates
 
@@ -202,6 +202,42 @@ Read `/workspace/project/data/registered_groups.json` and format it nicely.
 ## Global Memory
 
 You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
+
+---
+
+## Sender Access Control (Allowlist)
+
+When `ACCESS_MODE=allowlist` is set in `.env`, only senders in the `allowed_senders` table can trigger the agent. Messages from unlisted senders are still stored but don't invoke you.
+
+The owner is auto-seeded as admin on first run via `OWNER_ID` in `.env`.
+
+IMPORTANT: Manage the allowlist ONLY via `sqlite3` commands on the database. Do NOT create IPC tasks for this — there is no IPC handler for allowlist management.
+
+Sender IDs are UUIDs (Signal's primary identifier). To find a user's UUID, look up their sender ID from stored messages:
+
+```bash
+# Find a sender's UUID by name
+sqlite3 /workspace/project/store/messages.db "
+  SELECT DISTINCT sender, sender_name FROM messages
+  WHERE sender_name LIKE '%Alice%' ORDER BY timestamp DESC LIMIT 1;
+"
+
+# List all allowed senders
+sqlite3 /workspace/project/store/messages.db "SELECT * FROM allowed_senders;"
+
+# Add a sender by UUID
+sqlite3 /workspace/project/store/messages.db "
+  INSERT OR REPLACE INTO allowed_senders (sender_id, name, role, added_at, added_by)
+  VALUES ('a1b2c3d4-e5f6-7890-abcd-ef1234567890', 'Alice', 'user', datetime('now'), 'echo');
+"
+
+# Remove a sender
+sqlite3 /workspace/project/store/messages.db "
+  DELETE FROM allowed_senders WHERE sender_id = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+"
+```
+
+Roles: `admin` or `user` (no functional difference yet, reserved for future use).
 
 ---
 

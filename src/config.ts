@@ -14,6 +14,8 @@ const envConfig = readEnvFile([
   'SIGNAL_ONLY',
   'WEBHOOK_PORT',
   'WEBHOOK_SECRET',
+  'ACCESS_MODE',
+  'OWNER_ID',
 ]);
 
 export const ASSISTANT_NAME =
@@ -84,6 +86,13 @@ export const SIGNAL_CLI_DIR = SIGNAL_PHONE_NUMBER
 // Webhook server (disabled by default, set WEBHOOK_PORT to enable)
 export const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT || envConfig.WEBHOOK_PORT || '0', 10);
 export const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || envConfig.WEBHOOK_SECRET || '';
+
+// Access control: 'open' (default) = anyone can trigger, 'allowlist' = only listed senders
+export const ACCESS_MODE = (process.env.ACCESS_MODE || envConfig.ACCESS_MODE || 'open') as 'open' | 'allowlist';
+
+// Owner's sender ID (phone number or UUID) — auto-seeded as admin in allowlist
+export const OWNER_ID =
+  process.env.OWNER_ID || envConfig.OWNER_ID || '';
 
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default

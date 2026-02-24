@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
+import { ASSISTANT_NAME, DATA_DIR, OWNER_ID, STORE_DIR } from './config.js';
 import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
 
 let db: Database.Database;
@@ -75,6 +75,13 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS allowed_senders (
+      sender_id TEXT PRIMARY KEY,
+      name TEXT,
+      role TEXT DEFAULT 'user',
+      added_at TEXT NOT NULL,
+      added_by TEXT
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -123,6 +130,7 @@ export function initDatabase(): void {
 
   db = new Database(dbPath);
   createSchema(db);
+  seedOwnerIfNeeded();
 
   // Migrate from JSON files if they exist
   migrateJsonState();
@@ -589,6 +597,58 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Allowed senders (access control) ---
+
+export function isSenderAllowed(senderId: string): boolean {
+  const row = db
+    .prepare('SELECT 1 FROM allowed_senders WHERE sender_id = ?')
+    .get(senderId);
+  return !!row;
+}
+
+export function addAllowedSender(
+  senderId: string,
+  name?: string,
+  role: 'admin' | 'user' = 'user',
+  addedBy?: string,
+): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO allowed_senders (sender_id, name, role, added_at, added_by)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(senderId, name ?? null, role, new Date().toISOString(), addedBy ?? null);
+}
+
+export function removeAllowedSender(senderId: string): void {
+  db.prepare('DELETE FROM allowed_senders WHERE sender_id = ?').run(senderId);
+}
+
+export interface AllowedSender {
+  sender_id: string;
+  name: string | null;
+  role: string;
+  added_at: string;
+  added_by: string | null;
+}
+
+export function getAllAllowedSenders(): AllowedSender[] {
+  return db
+    .prepare('SELECT * FROM allowed_senders ORDER BY added_at')
+    .all() as AllowedSender[];
+}
+
+/**
+ * Auto-seed the owner as admin if no admins exist and OWNER_ID is set.
+ */
+export function seedOwnerIfNeeded(): void {
+  if (!OWNER_ID) return;
+  const admin = db
+    .prepare("SELECT 1 FROM allowed_senders WHERE role = 'admin'")
+    .get();
+  if (!admin) {
+    addAllowedSender(OWNER_ID, 'Owner', 'admin', 'system');
+  }
 }
 
 // --- JSON migration ---

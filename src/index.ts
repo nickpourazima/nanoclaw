@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  ACCESS_MODE,
   ASSISTANT_NAME,
   DATA_DIR,
   IDLE_TIMEOUT,
@@ -32,6 +33,7 @@ import {
   getNewMessages,
   getRouterState,
   initDatabase,
+  isSenderAllowed,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -82,6 +84,18 @@ function saveState(): void {
     'last_agent_timestamp',
     JSON.stringify(lastAgentTimestamp),
   );
+}
+
+function filterAllowedMessages(messages: NewMessage[]): NewMessage[] {
+  if (ACCESS_MODE === 'open') return messages;
+  return messages.filter(m => {
+    if (isSenderAllowed(m.sender)) return true;
+    logger.info(
+      { sender: m.sender, senderName: m.sender_name },
+      'Blocked message from unlisted sender (add to allowed_senders to permit)',
+    );
+    return false;
+  });
 }
 
 function slugifyGroupName(name: string): string {
@@ -154,7 +168,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-  const missedMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+  const missedMessages = filterAllowedMessages(
+    getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME),
+  );
 
   if (missedMessages.length === 0) return true;
 
@@ -203,10 +219,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        // Clear typing before sending so indicator stops as message arrives
-        await channel.setTyping?.(chatJid, false);
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+        // Suppress short filler confirmations ("Sent!", "Done!", etc.) — these
+        // are redundant noise after the agent already used send_message via IPC.
+        if (/^(sent|done|message sent|delivered|ok)\s*[.!]?\s*(\(.+\))?\s*$/i.test(text)) {
+          logger.debug({ group: group.name, text }, 'Suppressed redundant confirmation');
+        } else {
+          // Clear typing before sending so indicator stops as message arrives
+          await channel.setTyping?.(chatJid, false);
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -375,6 +397,9 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
+          const allowedGroupMessages = filterAllowedMessages(groupMessages);
+          if (allowedGroupMessages.length === 0) continue;
+
           const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
@@ -382,7 +407,7 @@ async function startMessageLoop(): Promise<void> {
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
-            const hasTrigger = groupMessages.some((m) =>
+            const hasTrigger = allowedGroupMessages.some((m) =>
               TRIGGER_PATTERN.test(m.content.trim()),
             );
             if (!hasTrigger) continue;
@@ -390,13 +415,13 @@ async function startMessageLoop(): Promise<void> {
 
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.
-          const allPending = getMessagesSince(
+          const allPending = filterAllowedMessages(getMessagesSince(
             chatJid,
             lastAgentTimestamp[chatJid] || '',
             ASSISTANT_NAME,
-          );
+          ));
           const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+            allPending.length > 0 ? allPending : allowedGroupMessages;
           const formatted = formatMessages(messagesToSend);
 
           if (queue.sendMessage(chatJid, formatted)) {

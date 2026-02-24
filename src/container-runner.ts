@@ -77,6 +77,13 @@ function buildVolumeMounts(
       readonly: true,
     });
 
+    // Mount store/ read-write so main can manage the DB (allowlist, etc.)
+    mounts.push({
+      hostPath: path.join(projectRoot, 'store'),
+      containerPath: '/workspace/project/store',
+      readonly: false,
+    });
+
     // Main also gets its group folder as the working directory
     mounts.push({
       hostPath: path.join(GROUPS_DIR, group.folder),
