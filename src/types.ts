@@ -102,6 +102,8 @@ export interface Channel {
   sendReaction?(jid: string, emoji: string, targetAuthor: string, targetTimestamp: number): Promise<void>;
   // Optional: reply/quote a specific message.
   sendReply?(jid: string, text: string, targetAuthor: string, targetTimestamp: number, attachments?: string[]): Promise<void>;
+  // Optional: create a poll.
+  sendPoll?(jid: string, question: string, options: string[]): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

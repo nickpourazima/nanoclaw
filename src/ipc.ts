@@ -20,6 +20,7 @@ export interface IpcDeps {
   sendMessage: (jid: string, text: string, attachments?: string[]) => Promise<void>;
   sendReaction: (jid: string, emoji: string, targetAuthor: string, targetTimestamp: number) => Promise<void>;
   sendReply: (jid: string, text: string, targetAuthor: string, targetTimestamp: number, attachments?: string[]) => Promise<void>;
+  sendPoll: (jid: string, question: string, options: string[]) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -173,6 +174,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup, emoji: data.emoji },
                     'IPC reaction sent',
+                  );
+                } else if (data.type === 'poll' && data.question && Array.isArray(data.options)) {
+                  await deps.sendPoll(data.chatJid, data.question, data.options);
+                  logger.info(
+                    { chatJid: data.chatJid, sourceGroup, question: data.question },
+                    'IPC poll sent',
                   );
                 } else if (data.type === 'message' && data.text) {
                   const hostAttachments = resolveAttachmentPaths(

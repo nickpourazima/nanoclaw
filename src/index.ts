@@ -556,6 +556,11 @@ async function main(): Promise<void> {
       }
       return channel.sendReply(jid, text, targetAuthor, targetTimestamp, attachments);
     },
+    sendPoll: (jid, question, options) => {
+      const channel = findChannel(channels, jid);
+      if (!channel?.sendPoll) throw new Error(`No channel with poll support for JID: ${jid}`);
+      return channel.sendPoll(jid, question, options);
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),

@@ -121,6 +121,29 @@ server.tool(
 );
 
 server.tool(
+  'send_poll',
+  'Create a poll in the current chat. Signal only. Use for quick votes, decisions, or surveys.',
+  {
+    question: z.string().describe('The poll question (e.g., "What should we have for dinner?")'),
+    options: z.array(z.string()).min(2).max(12).describe('Poll options (2-12 choices)'),
+  },
+  async (args) => {
+    const data = {
+      type: 'poll',
+      chatJid,
+      question: args.question,
+      options: args.options,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: `Poll created: "${args.question}" with ${args.options.length} options.` }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools.
 

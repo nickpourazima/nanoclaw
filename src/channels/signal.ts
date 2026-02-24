@@ -6,6 +6,7 @@ import { ASSISTANT_NAME, SIGNAL_CLI_DIR, SIGNAL_CLI_PATH, SIGNAL_PHONE_NUMBER } 
 import { lookupSenderName } from '../db.js';
 import { logger } from '../logger.js';
 import { optimizeImageForVision, transcribeAudioFile } from '../media.js';
+import { parseSignalStyles } from '../signal-formatting.js';
 import { Attachment, Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
 
 const HEALTH_TIMEOUT_MS = 120000;
@@ -631,10 +632,37 @@ export class SignalChannel implements Channel {
     logger.info({ chatJid }, '/chatid response sent');
   }
 
+  async sendPoll(jid: string, question: string, options: string[]): Promise<void> {
+    if (!this.connected) {
+      logger.warn({ jid, question }, 'Signal disconnected, poll dropped');
+      return;
+    }
+
+    const target = jid.replace(/^signal:/, '');
+    const params: Record<string, unknown> = { question, option: options };
+
+    if (target.startsWith('+') || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target)) {
+      params.recipient = [target];
+    } else {
+      params.groupId = target;
+    }
+
+    try {
+      await this.rpcCall('sendPollCreate', params);
+      logger.info({ jid, question, optionCount: options.length }, 'Signal poll sent');
+    } catch (err) {
+      logger.warn({ jid, question, err }, 'Failed to send Signal poll');
+    }
+  }
+
   private async rpcSend(jid: string, text: string, attachments?: string[], quote?: { timestamp: number; author: string }): Promise<void> {
     const target = jid.replace(/^signal:/, '');
 
-    const params: Record<string, unknown> = { message: text };
+    const { text: plainText, textStyle } = parseSignalStyles(text);
+    const params: Record<string, unknown> = { message: plainText };
+    if (textStyle.length > 0) {
+      params.textStyle = textStyle.map(s => `${s.start}:${s.length}:${s.style}`);
+    }
     if (target.startsWith('+')) {
       // Phone number
       params.recipient = [target];
