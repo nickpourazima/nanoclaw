@@ -114,6 +114,23 @@ describe('signal skill package', () => {
     expect(content).toContain('export const TIMEZONE');
   });
 
+  it('modified index.ts preserves upstream security and API patterns', () => {
+    const content = fs.readFileSync(
+      path.join(skillDir, 'modify', 'src', 'index.ts'),
+      'utf-8',
+    );
+
+    // registerGroup must use resolveGroupFolderPath (not naive path.join)
+    expect(content).toContain('resolveGroupFolderPath');
+    expect(content).toContain("import { resolveGroupFolderPath } from './group-folder.js'");
+
+    // runContainerAgent must pass assistantName
+    expect(content).toContain('assistantName: ASSISTANT_NAME');
+
+    // Should NOT import DATA_DIR (upstream removed it from index.ts)
+    expect(content).not.toMatch(/import\s*\{[^}]*DATA_DIR[^}]*\}\s*from\s*'\.\/config\.js'/);
+  });
+
   it('add/ signal.ts includes security hardening', () => {
     const content = fs.readFileSync(
       path.join(skillDir, 'add', 'src', 'channels', 'signal.ts'),
