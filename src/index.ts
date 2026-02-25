@@ -21,6 +21,7 @@ import {
   runContainerAgent,
   writeGroupMetadataSnapshot,
   writeGroupsSnapshot,
+  writeSessionStatsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
 import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
@@ -32,8 +33,10 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
+  getSessionStats,
   initDatabase,
   isSenderAllowed,
+  logSessionRun,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -271,6 +274,12 @@ async function runAgent(
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
+  const startTime = Date.now();
+  const startedAt = new Date().toISOString();
+
+  // Write session history snapshot for container to read
+  const recentStats = getSessionStats(group.folder);
+  writeSessionStatsSnapshot(group.folder, recentStats);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -321,6 +330,9 @@ async function runAgent(
       }
     : undefined;
 
+  let status: 'success' | 'error' = 'error';
+  let errorMsg: string | undefined;
+
   try {
     const output = await runContainerAgent(
       group,
@@ -345,14 +357,43 @@ async function runAgent(
         { group: group.name, error: output.error },
         'Container agent error',
       );
-      return 'error';
+      status = 'error';
+      errorMsg = output.error;
+    } else {
+      status = 'success';
     }
-
-    return 'success';
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
-    return 'error';
+    status = 'error';
+    errorMsg = err instanceof Error ? err.message : String(err);
+  } finally {
+    const completedAt = new Date().toISOString();
+    const durationMs = Date.now() - startTime;
+
+    // Read query_count from container's stats file
+    let queryCount: number | undefined;
+    try {
+      const statsPath = path.join(DATA_DIR, 'ipc', group.folder, 'session_stats.json');
+      const raw = JSON.parse(fs.readFileSync(statsPath, 'utf-8'));
+      queryCount = raw.query_count;
+    } catch {
+      // Container may not have written stats (e.g. early failure)
+    }
+
+    logSessionRun({
+      group_folder: group.folder,
+      chat_jid: chatJid,
+      session_id: sessions[group.folder],
+      duration_ms: durationMs,
+      query_count: queryCount,
+      status,
+      error: errorMsg,
+      started_at: startedAt,
+      completed_at: completedAt,
+    });
   }
+
+  return status;
 }
 
 async function startMessageLoop(): Promise<void> {

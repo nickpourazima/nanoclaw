@@ -195,7 +195,7 @@ function buildVolumeMounts(
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL']);
 }
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
@@ -495,6 +495,8 @@ export async function runContainerAgent(
             .map((m) => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`)
             .join('\n'),
           ``,
+          `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
+          stderr,
         );
       }
 
@@ -661,6 +663,33 @@ export interface AvailableGroup {
  * Only main group can see all available groups (for activation).
  * Non-main groups only see their own registration status.
  */
+export interface SessionStatSnapshot {
+  group_folder: string;
+  chat_jid: string;
+  session_id: string | null;
+  duration_ms: number;
+  query_count: number | null;
+  status: string;
+  error: string | null;
+  started_at: string;
+  completed_at: string;
+}
+
+/**
+ * Write recent session history snapshot for the container to read.
+ * Follows the same pattern as writeTasksSnapshot / writeGroupsSnapshot.
+ */
+export function writeSessionStatsSnapshot(
+  groupFolder: string,
+  stats: SessionStatSnapshot[],
+): void {
+  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+
+  const statsFile = path.join(groupIpcDir, 'session_history.json');
+  fs.writeFileSync(statsFile, JSON.stringify(stats, null, 2));
+}
+
 export function writeGroupsSnapshot(
   groupFolder: string,
   isMain: boolean,

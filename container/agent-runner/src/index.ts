@@ -492,6 +492,8 @@ async function runQuery(
 }
 
 async function main(): Promise<void> {
+  const startTime = Date.now();
+  let queryCount = 0;
   let containerInput: ContainerInput;
 
   try {
@@ -540,7 +542,8 @@ async function main(): Promise<void> {
   let resumeAt: string | undefined;
   try {
     while (true) {
-      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
+      queryCount++;
+      log(`Starting query #${queryCount} (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
       const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
       if (queryResult.newSessionId) {
@@ -583,6 +586,14 @@ async function main(): Promise<void> {
       error: errorMessage
     });
     process.exit(1);
+  } finally {
+    // Write only query_count — the host process handles full stats persistence
+    try {
+      fs.writeFileSync('/workspace/ipc/session_stats.json', JSON.stringify({ query_count: queryCount }));
+      log(`Session stats written: ${queryCount} queries`);
+    } catch (err) {
+      log(`Failed to write session stats: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 }
 

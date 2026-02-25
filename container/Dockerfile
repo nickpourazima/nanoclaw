@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 RUN uv venv /opt/audio-venv && \
     uv pip install --python /opt/audio-venv/bin/python \
-      librosa numpy soundfile matplotlib
+      librosa numpy soundfile matplotlib yt-dlp
 ENV VIRTUAL_ENV=/opt/audio-venv
 ENV PATH="/opt/audio-venv/bin:$PATH"
 
