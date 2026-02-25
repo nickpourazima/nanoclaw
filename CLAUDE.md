@@ -33,6 +33,9 @@ Single Node.js process that connects to WhatsApp, routes messages to Claude Agen
 | `/customize` | Adding channels, integrations, changing behavior |
 | `/add-signal` | Add Signal channel via signal-cli (requires Java 21+) |
 | `/debug` | Container issues, logs, troubleshooting |
+| `/update` | Pull upstream NanoClaw changes, merge with customizations, run migrations |
+| `/qodo-pr-resolver` | Fetch and fix Qodo PR review issues interactively or in batch |
+| `/get-qodo-rules` | Load org- and repo-level coding rules from Qodo before code tasks |
 
 ## Development
 

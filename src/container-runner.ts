@@ -15,6 +15,7 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   SIGNAL_CLI_DIR,
+  TIMEZONE,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -213,6 +214,9 @@ function buildContainerArgs(mounts: VolumeMount[], containerName: string): strin
     '--cpus', '8',
     '--security-opt', 'no-new-privileges:true',
   ];
+
+  // Pass host timezone so container's local time matches the user's
+  args.push('-e', `TZ=${TIMEZONE}`);
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
