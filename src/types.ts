@@ -41,6 +41,14 @@ export interface RegisteredGroup {
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
 }
 
+export interface Attachment {
+  contentType: string;
+  filename?: string;
+  hostPath: string;
+  containerPath: string;
+  size?: number;
+}
+
 export interface NewMessage {
   id: string;
   chat_jid: string;
@@ -50,6 +58,9 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  attachments?: Attachment[];
+  quote?: { author: string; text: string };
+  reaction?: { emoji: string; targetAuthor: string; targetTimestamp: string };
 }
 
 export interface ScheduledTask {
@@ -81,12 +92,18 @@ export interface TaskRunLog {
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
+  sendMessage(jid: string, text: string, attachments?: string[]): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // Optional: react to a specific message with an emoji.
+  sendReaction?(jid: string, emoji: string, targetAuthor: string, targetTimestamp: number): Promise<void>;
+  // Optional: reply/quote a specific message.
+  sendReply?(jid: string, text: string, targetAuthor: string, targetTimestamp: number, attachments?: string[]): Promise<void>;
+  // Optional: create a poll.
+  sendPoll?(jid: string, question: string, options: string[]): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

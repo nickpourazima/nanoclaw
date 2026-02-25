@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
+import { ASSISTANT_NAME, DATA_DIR, OWNER_ID, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
@@ -77,6 +77,27 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS allowed_senders (
+      sender_id TEXT PRIMARY KEY,
+      name TEXT,
+      role TEXT DEFAULT 'user',
+      added_at TEXT NOT NULL,
+      added_by TEXT
+    );
+    CREATE TABLE IF NOT EXISTS session_stats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      session_id TEXT,
+      duration_ms INTEGER NOT NULL,
+      query_count INTEGER,
+      status TEXT NOT NULL,
+      error TEXT,
+      started_at TEXT NOT NULL,
+      completed_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_stats_group ON session_stats(group_folder);
+    CREATE INDEX IF NOT EXISTS idx_session_stats_completed ON session_stats(completed_at);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -125,6 +146,7 @@ export function initDatabase(): void {
 
   db = new Database(dbPath);
   createSchema(db);
+  seedOwnerIfNeeded();
 
   // Migrate from JSON files if they exist
   migrateJsonState();
@@ -327,6 +349,18 @@ export function getMessagesSince(
   return db
     .prepare(sql)
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
+}
+
+/**
+ * Look up the most recent sender_name for a given sender ID (UUID or phone number).
+ */
+export function lookupSenderName(senderId: string): string | undefined {
+  const row = db
+    .prepare(
+      'SELECT sender_name FROM messages WHERE sender = ? AND sender_name IS NOT NULL ORDER BY timestamp DESC LIMIT 1',
+    )
+    .get(senderId) as { sender_name: string } | undefined;
+  return row?.sender_name;
 }
 
 export function createTask(
@@ -596,6 +630,113 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Allowed senders (access control) ---
+
+export function isSenderAllowed(senderId: string): boolean {
+  const row = db
+    .prepare('SELECT 1 FROM allowed_senders WHERE sender_id = ?')
+    .get(senderId);
+  return !!row;
+}
+
+export function addAllowedSender(
+  senderId: string,
+  name?: string,
+  role: 'admin' | 'user' = 'user',
+  addedBy?: string,
+): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO allowed_senders (sender_id, name, role, added_at, added_by)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(senderId, name ?? null, role, new Date().toISOString(), addedBy ?? null);
+}
+
+export function removeAllowedSender(senderId: string): void {
+  db.prepare('DELETE FROM allowed_senders WHERE sender_id = ?').run(senderId);
+}
+
+export interface AllowedSender {
+  sender_id: string;
+  name: string | null;
+  role: string;
+  added_at: string;
+  added_by: string | null;
+}
+
+export function getAllAllowedSenders(): AllowedSender[] {
+  return db
+    .prepare('SELECT * FROM allowed_senders ORDER BY added_at')
+    .all() as AllowedSender[];
+}
+
+/**
+ * Auto-seed the owner as admin if no admins exist and OWNER_ID is set.
+ */
+export function seedOwnerIfNeeded(): void {
+  if (!OWNER_ID) return;
+  const admin = db
+    .prepare("SELECT 1 FROM allowed_senders WHERE role = 'admin'")
+    .get();
+  if (!admin) {
+    addAllowedSender(OWNER_ID, 'Owner', 'admin', 'system');
+  }
+}
+
+// --- Session stats ---
+
+export interface SessionStatsRow {
+  id: number;
+  group_folder: string;
+  chat_jid: string;
+  session_id: string | null;
+  duration_ms: number;
+  query_count: number | null;
+  status: string;
+  error: string | null;
+  started_at: string;
+  completed_at: string;
+}
+
+export function logSessionRun(stats: {
+  group_folder: string;
+  chat_jid: string;
+  session_id?: string;
+  duration_ms: number;
+  query_count?: number;
+  status: string;
+  error?: string;
+  started_at: string;
+  completed_at: string;
+}): void {
+  db.prepare(
+    `INSERT INTO session_stats (group_folder, chat_jid, session_id, duration_ms, query_count, status, error, started_at, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    stats.group_folder,
+    stats.chat_jid,
+    stats.session_id ?? null,
+    stats.duration_ms,
+    stats.query_count ?? null,
+    stats.status,
+    stats.error ?? null,
+    stats.started_at,
+    stats.completed_at,
+  );
+}
+
+export function getSessionStats(groupFolder?: string, limit = 50): SessionStatsRow[] {
+  if (groupFolder) {
+    return db
+      .prepare(
+        'SELECT * FROM session_stats WHERE group_folder = ? ORDER BY completed_at DESC LIMIT ?',
+      )
+      .all(groupFolder, limit) as SessionStatsRow[];
+  }
+  return db
+    .prepare('SELECT * FROM session_stats ORDER BY completed_at DESC LIMIT ?')
+    .all(limit) as SessionStatsRow[];
 }
 
 // --- JSON migration ---

@@ -6,7 +6,7 @@ import { EventEmitter } from 'events';
 // Mock config
 vi.mock('../config.js', () => ({
   STORE_DIR: '/tmp/nanoclaw-test-store',
-  ASSISTANT_NAME: 'Andy',
+  ASSISTANT_NAME: 'Echo',
   ASSISTANT_HAS_OWN_NUMBER: false,
 }));
 
@@ -108,7 +108,7 @@ function createTestOpts(overrides?: Partial<WhatsAppChannelOpts>): WhatsAppChann
       'registered@g.us': {
         name: 'Test Group',
         folder: 'test-group',
-        trigger: '@Andy',
+        trigger: '@Echo',
         added_at: '2024-01-01T00:00:00.000Z',
       },
     })),
@@ -202,7 +202,7 @@ describe('WhatsAppChannel', () => {
       // Group messages get prefixed when flushed
       expect(fakeSocket.sendMessage).toHaveBeenCalledWith(
         'test@g.us',
-        { text: 'Andy: Queued message' },
+        { text: 'Echo: Queued message' },
       );
     });
 
@@ -311,7 +311,7 @@ describe('WhatsAppChannel', () => {
             participant: '5551234@s.whatsapp.net',
             fromMe: false,
           },
-          message: { conversation: 'Hello Andy' },
+          message: { conversation: 'Hello Echo' },
           pushName: 'Alice',
           messageTimestamp: Math.floor(Date.now() / 1000),
         },
@@ -328,7 +328,7 @@ describe('WhatsAppChannel', () => {
         'registered@g.us',
         expect.objectContaining({
           id: 'msg-1',
-          content: 'Hello Andy',
+          content: 'Hello Echo',
           sender_name: 'Alice',
           is_from_me: false,
         }),
@@ -554,7 +554,7 @@ describe('WhatsAppChannel', () => {
           '1234567890@s.whatsapp.net': {
             name: 'Self Chat',
             folder: 'self-chat',
-            trigger: '@Andy',
+            trigger: '@Echo',
             added_at: '2024-01-01T00:00:00.000Z',
           },
         })),
@@ -658,7 +658,7 @@ describe('WhatsAppChannel', () => {
 
       await channel.sendMessage('test@g.us', 'Hello');
       // Group messages get prefixed with assistant name
-      expect(fakeSocket.sendMessage).toHaveBeenCalledWith('test@g.us', { text: 'Andy: Hello' });
+      expect(fakeSocket.sendMessage).toHaveBeenCalledWith('test@g.us', { text: 'Echo: Hello' });
     });
 
     it('prefixes direct chat messages on shared number', async () => {
@@ -669,7 +669,7 @@ describe('WhatsAppChannel', () => {
 
       await channel.sendMessage('123@s.whatsapp.net', 'Hello');
       // Shared number: DMs also get prefixed (needed for self-chat distinction)
-      expect(fakeSocket.sendMessage).toHaveBeenCalledWith('123@s.whatsapp.net', { text: 'Andy: Hello' });
+      expect(fakeSocket.sendMessage).toHaveBeenCalledWith('123@s.whatsapp.net', { text: 'Echo: Hello' });
     });
 
     it('queues message when disconnected', async () => {
@@ -713,9 +713,9 @@ describe('WhatsAppChannel', () => {
 
       expect(fakeSocket.sendMessage).toHaveBeenCalledTimes(3);
       // Group messages get prefixed
-      expect(fakeSocket.sendMessage).toHaveBeenNthCalledWith(1, 'test@g.us', { text: 'Andy: First' });
-      expect(fakeSocket.sendMessage).toHaveBeenNthCalledWith(2, 'test@g.us', { text: 'Andy: Second' });
-      expect(fakeSocket.sendMessage).toHaveBeenNthCalledWith(3, 'test@g.us', { text: 'Andy: Third' });
+      expect(fakeSocket.sendMessage).toHaveBeenNthCalledWith(1, 'test@g.us', { text: 'Echo: First' });
+      expect(fakeSocket.sendMessage).toHaveBeenNthCalledWith(2, 'test@g.us', { text: 'Echo: Second' });
+      expect(fakeSocket.sendMessage).toHaveBeenNthCalledWith(3, 'test@g.us', { text: 'Echo: Third' });
     });
   });
 

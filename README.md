@@ -13,7 +13,7 @@
   <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="34.9k tokens, 17% of context window" valign="middle"></a>
 </p>
 
-**New:** First AI assistant to support [Agent Swarms](https://code.claude.com/docs/en/agent-teams). Spin up teams of agents that collaborate in your chat.
+> **Fork note:** This fork adds native Signal support to NanoClaw via [signal-cli](https://github.com/AsamK/signal-cli). Upstream: [qwibitai/nanoclaw](https://github.com/qwibitai/nanoclaw).
 
 ## Why I Built This
 
@@ -24,12 +24,12 @@ NanoClaw gives you the same core functionality in a codebase you can understand 
 ## Quick Start
 
 ```bash
-git clone https://github.com/qwibitai/nanoclaw.git
+git clone https://github.com/nickpourazima/nanoclaw.git
 cd nanoclaw
 claude
 ```
 
-Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup, service configuration.
+Then run `/setup` for WhatsApp, or `/add-signal` for Signal. Claude Code handles everything: dependencies, authentication, container setup, service configuration.
 
 ## Philosophy
 
@@ -43,36 +43,56 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 
 **AI-native.** No installation wizard; Claude Code guides setup. No monitoring dashboard; ask Claude what's happening. No debugging tools; describe the problem, Claude fixes it.
 
-**Skills over features.** Contributors shouldn't add features (e.g. support for Telegram) to the codebase. Instead, they contribute [claude code skills](https://code.claude.com/docs/en/skills) like `/add-telegram` that transform your fork. You end up with clean code that does exactly what you need.
+**Skills over features.** Contributors shouldn't add features (e.g. support for Telegram) to the codebase. Instead, they contribute [claude code skills](https://code.claude.com/docs/en/skills) like `/add-telegram` that transform your fork. You end up with clean code that does exactly what you need, not a bloated system trying to support every use case.
 
 **Best harness, best model.** This runs on Claude Agent SDK, which means you're running Claude Code directly. The harness matters. A bad harness makes even smart models seem dumb, a good harness gives them superpowers. Claude Code is (IMO) the best harness available.
 
 ## What It Supports
 
-- **WhatsApp I/O** - Message Claude from your phone
-- **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted
-- **Main channel** - Your private channel (self-chat) for admin control; every other group is completely isolated
+- **Signal messaging** - Send and receive messages via signal-cli JSON-RPC
+- **WhatsApp messaging** - Message Claude from your phone via baileys
+- **Typing indicators** - Shows typing while agent is working (auto-resends for Signal's 15s expiry)
+- **Reactions & replies** - React to messages and reply with quoted context
+- **Polls** - Create Signal polls from agent responses
+- **Text styling** - Bold, italic, monospace, strikethrough in Signal messages
+- **Voice transcription** - Transcribe voice notes locally via whisper.cpp
+- **Attachments** - Send and receive images, files, audio with optimized image handling
+- **Audio analysis** - Analyze audio files with librosa (BPM, key, spectrograms)
+- **Access control** - Sender allowlist per group
+- **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox
+- **Main channel** - Your private channel for admin control; every other group is completely isolated
 - **Scheduled tasks** - Recurring jobs that run Claude and can message you back
+- **Webhooks** - HTTP endpoint to trigger agent responses from external services
 - **Web access** - Search and fetch content
 - **Container isolation** - Agents sandboxed in Apple Container (macOS) or Docker (macOS/Linux)
-- **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks (first personal AI assistant to support this)
+- **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks
 - **Optional integrations** - Add Gmail (`/add-gmail`) and more via skills
+
+## Signal Setup
+
+Run `/add-signal` in Claude Code. It will:
+1. Download and install signal-cli
+2. Link your Signal account (QR code or phone number)
+3. Configure `SIGNAL_PHONE_NUMBER` in your environment
+4. Set up the polling loop
+
+Or set `SIGNAL_PHONE_NUMBER` manually if signal-cli is already installed.
 
 ## Usage
 
-Talk to your assistant with the trigger word (default: `@Andy`):
+Talk to your assistant with the trigger word (default: `@Echo`):
 
 ```
-@Andy send an overview of the sales pipeline every weekday morning at 9am (has access to my Obsidian vault folder)
-@Andy review the git history for the past week each Friday and update the README if there's drift
-@Andy every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
+@Echo send an overview of the sales pipeline every weekday morning at 9am
+@Echo review the git history for the past week each Friday and update the README if there's drift
+@Echo every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
 ```
 
 From the main channel (your self-chat), you can manage groups and tasks:
 ```
-@Andy list all scheduled tasks across groups
-@Andy pause the Monday briefing task
-@Andy join the Family Chat group
+@Echo list all scheduled tasks across groups
+@Echo pause the Monday briefing task
+@Echo join the Family Chat group
 ```
 
 ## Customizing
@@ -117,11 +137,13 @@ Skills we'd like to see:
 - Node.js 20+
 - [Claude Code](https://claude.ai/download)
 - [Apple Container](https://github.com/apple/container) (macOS) or [Docker](https://docker.com/products/docker-desktop) (macOS/Linux)
+- For Signal: Java 21+ and [signal-cli](https://github.com/AsamK/signal-cli)
 
 ## Architecture
 
 ```
-WhatsApp (baileys) --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+Signal (signal-cli) ──→ SQLite ──→ Polling loop ──→ Container (Claude Agent SDK) ──→ Response
+WhatsApp (baileys)  ──↗
 ```
 
 Single Node.js process. Agents execute in isolated Linux containers with mounted directories. Per-group message queue with concurrency control. IPC via filesystem.
@@ -129,6 +151,10 @@ Single Node.js process. Agents execute in isolated Linux containers with mounted
 Key files:
 - `src/index.ts` - Orchestrator: state, message loop, agent invocation
 - `src/channels/whatsapp.ts` - WhatsApp connection, auth, send/receive
+- `src/channels/signal.ts` - Signal connection via signal-cli JSON-RPC
+- `src/signal-formatting.ts` - Signal text styling (bold, italic, monospace, strikethrough)
+- `src/media.ts` - Voice transcription (whisper.cpp), image optimization (ffmpeg)
+- `src/webhook.ts` - HTTP webhook server for external triggers
 - `src/ipc.ts` - IPC watcher and task processing
 - `src/router.ts` - Message formatting and outbound routing
 - `src/group-queue.ts` - Per-group queue with global concurrency limit
@@ -139,9 +165,9 @@ Key files:
 
 ## FAQ
 
-**Why WhatsApp and not Telegram/Signal/etc?**
+**Can I use both Signal and WhatsApp?**
 
-Because I use WhatsApp. Fork it and run a skill to change it. That's the whole point.
+Yes. NanoClaw supports multiple channels simultaneously. Each channel registers its groups independently, and the routing layer handles delivery to the correct channel.
 
 **Why Docker?**
 

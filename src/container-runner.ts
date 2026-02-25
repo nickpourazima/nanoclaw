@@ -2,22 +2,24 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, execFile, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
 import {
+  ASSISTANT_NAME,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  SIGNAL_CLI_DIR,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
-import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainerArgs } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -32,6 +34,7 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  assistantName?: string;
   secrets?: Record<string, string>;
 }
 
@@ -66,6 +69,13 @@ function buildVolumeMounts(
       hostPath: projectRoot,
       containerPath: '/workspace/project',
       readonly: true,
+    });
+
+    // Mount store/ read-write so main can manage the DB (allowlist, etc.)
+    mounts.push({
+      hostPath: path.join(projectRoot, 'store'),
+      containerPath: '/workspace/project/store',
+      readonly: false,
     });
 
     // Main also gets its group folder as the working directory
@@ -173,6 +183,18 @@ function buildVolumeMounts(
     mounts.push(...validatedMounts);
   }
 
+  // Signal-cli attachments directory (read-only so agent can read images)
+  if (SIGNAL_CLI_DIR) {
+    const attachmentsDir = path.join(SIGNAL_CLI_DIR, 'attachments');
+    if (fs.existsSync(attachmentsDir)) {
+      mounts.push({
+        hostPath: attachmentsDir,
+        containerPath: '/workspace/signal-attachments',
+        readonly: true,
+      });
+    }
+  }
+
   return mounts;
 }
 
@@ -181,11 +203,16 @@ function buildVolumeMounts(
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL']);
 }
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
-  const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+  const args: string[] = ['run', '-i', '--rm', '--name', containerName,
+    '--memory', '16g',
+    '--pids-limit', '1024',
+    '--cpus', '8',
+    '--security-opt', 'no-new-privileges:true',
+  ];
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
@@ -264,8 +291,9 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    // Pass secrets via stdin (never written to disk or mounted as files)
+    // Pass secrets and config via stdin (never written to disk or mounted as files)
     input.secrets = readSecrets();
+    input.assistantName = ASSISTANT_NAME;
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
     // Remove secrets from input so they don't appear in logs
@@ -360,7 +388,7 @@ export async function runContainerAgent(
     const killOnTimeout = () => {
       timedOut = true;
       logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
-      exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
+      execFile(CONTAINER_RUNTIME_BIN, stopContainerArgs(containerName), { timeout: 15000 }, (err) => {
         if (err) {
           logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
           container.kill('SIGKILL');
@@ -475,6 +503,8 @@ export async function runContainerAgent(
             .map((m) => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`)
             .join('\n'),
           ``,
+          `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
+          stderr,
         );
       }
 
@@ -605,6 +635,30 @@ export function writeTasksSnapshot(
   fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
 }
 
+export interface GroupMetadataSnapshot {
+  description: string;
+  members: string[];
+  admins: string[];
+}
+
+/**
+ * Write Signal group metadata snapshot for the container to read.
+ * Lets the agent see group description, member list, and admins.
+ */
+export function writeGroupMetadataSnapshot(
+  groupFolder: string,
+  metadata: GroupMetadataSnapshot | undefined,
+): void {
+  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+
+  const metadataFile = path.join(groupIpcDir, 'group_metadata.json');
+  fs.writeFileSync(
+    metadataFile,
+    JSON.stringify(metadata || { description: '', members: [], admins: [] }, null, 2),
+  );
+}
+
 export interface AvailableGroup {
   jid: string;
   name: string;
@@ -617,6 +671,33 @@ export interface AvailableGroup {
  * Only main group can see all available groups (for activation).
  * Non-main groups only see their own registration status.
  */
+export interface SessionStatSnapshot {
+  group_folder: string;
+  chat_jid: string;
+  session_id: string | null;
+  duration_ms: number;
+  query_count: number | null;
+  status: string;
+  error: string | null;
+  started_at: string;
+  completed_at: string;
+}
+
+/**
+ * Write recent session history snapshot for the container to read.
+ * Follows the same pattern as writeTasksSnapshot / writeGroupsSnapshot.
+ */
+export function writeSessionStatsSnapshot(
+  groupFolder: string,
+  stats: SessionStatSnapshot[],
+): void {
+  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+
+  const statsFile = path.join(groupIpcDir, 'session_history.json');
+  fs.writeFileSync(statsFile, JSON.stringify(stats, null, 2));
+}
+
 export function writeGroupsSnapshot(
   groupFolder: string,
   isMain: boolean,

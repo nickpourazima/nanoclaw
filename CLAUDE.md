@@ -12,6 +12,10 @@ Single Node.js process that connects to WhatsApp, routes messages to Claude Agen
 |------|---------|
 | `src/index.ts` | Orchestrator: state, message loop, agent invocation |
 | `src/channels/whatsapp.ts` | WhatsApp connection, auth, send/receive |
+| `src/channels/signal.ts` | Signal connection via signal-cli JSON-RPC |
+| `src/signal-formatting.ts` | Signal text styling (bold, italic, monospace, strikethrough) |
+| `src/media.ts` | Voice transcription (whisper.cpp), image optimization |
+| `src/webhook.ts` | HTTP webhook server for external triggers |
 | `src/ipc.ts` | IPC watcher and task processing |
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
@@ -27,6 +31,7 @@ Single Node.js process that connects to WhatsApp, routes messages to Claude Agen
 |-------|-------------|
 | `/setup` | First-time installation, authentication, service configuration |
 | `/customize` | Adding channels, integrations, changing behavior |
+| `/add-signal` | Add Signal channel via signal-cli (requires Java 21+) |
 | `/debug` | Container issues, logs, troubleshooting |
 
 ## Development

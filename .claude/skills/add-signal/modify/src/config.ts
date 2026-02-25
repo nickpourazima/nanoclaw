@@ -12,14 +12,10 @@ const envConfig = readEnvFile([
   'SIGNAL_PHONE_NUMBER',
   'SIGNAL_CLI_PATH',
   'SIGNAL_ONLY',
-  'WEBHOOK_PORT',
-  'WEBHOOK_SECRET',
-  'ACCESS_MODE',
-  'OWNER_ID',
 ]);
 
 export const ASSISTANT_NAME =
-  process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Echo';
+  process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER || envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const POLL_INTERVAL = 2000;
@@ -66,7 +62,7 @@ function escapeRegex(str: string): string {
 }
 
 export const TRIGGER_PATTERN = new RegExp(
-  `(?:^|\\s)@${escapeRegex(ASSISTANT_NAME)}\\b`,
+  `^@${escapeRegex(ASSISTANT_NAME)}\\b`,
   'i',
 );
 
@@ -77,22 +73,6 @@ export const SIGNAL_CLI_PATH =
   process.env.SIGNAL_CLI_PATH || envConfig.SIGNAL_CLI_PATH || 'signal-cli';
 export const SIGNAL_ONLY =
   (process.env.SIGNAL_ONLY || envConfig.SIGNAL_ONLY) === 'true';
-
-// Signal-cli root directory (attachments are stored at {root}/attachments/)
-export const SIGNAL_CLI_DIR = SIGNAL_PHONE_NUMBER
-  ? path.join(os.homedir(), '.local', 'share', 'signal-cli')
-  : '';
-
-// Webhook server (disabled by default, set WEBHOOK_PORT to enable)
-export const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT || envConfig.WEBHOOK_PORT || '0', 10);
-export const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || envConfig.WEBHOOK_SECRET || '';
-
-// Access control: 'open' (default) = anyone can trigger, 'allowlist' = only listed senders
-export const ACCESS_MODE = (process.env.ACCESS_MODE || envConfig.ACCESS_MODE || 'open') as 'open' | 'allowlist';
-
-// Owner's sender ID (phone number or UUID) — auto-seeded as admin in allowlist
-export const OWNER_ID =
-  process.env.OWNER_ID || envConfig.OWNER_ID || '';
 
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default

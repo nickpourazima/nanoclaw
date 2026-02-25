@@ -2,7 +2,6 @@ import fs from 'fs';
 import path from 'path';
 
 import {
-  ACCESS_MODE,
   ASSISTANT_NAME,
   DATA_DIR,
   IDLE_TIMEOUT,
@@ -11,17 +10,13 @@ import {
   SIGNAL_ONLY,
   SIGNAL_PHONE_NUMBER,
   TRIGGER_PATTERN,
-  WEBHOOK_PORT,
-  WEBHOOK_SECRET,
 } from './config.js';
 import { SignalChannel } from './channels/signal.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import {
   ContainerOutput,
   runContainerAgent,
-  writeGroupMetadataSnapshot,
   writeGroupsSnapshot,
-  writeSessionStatsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
 import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
@@ -33,10 +28,7 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
-  getSessionStats,
   initDatabase,
-  isSenderAllowed,
-  logSessionRun,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -44,12 +36,10 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
-import { startWebhookServer } from './webhook.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -90,50 +80,12 @@ function saveState(): void {
   );
 }
 
-function filterAllowedMessages(messages: NewMessage[]): NewMessage[] {
-  if (ACCESS_MODE === 'open') return messages;
-  return messages.filter(m => {
-    if (isSenderAllowed(m.sender)) return true;
-    logger.info(
-      { sender: m.sender, senderName: m.sender_name },
-      'Blocked message from unlisted sender (add to allowed_senders to permit)',
-    );
-    return false;
-  });
-}
-
-function slugifyGroupName(name: string): string {
-  let slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40);
-  if (!slug || !/^[a-z0-9]/.test(slug)) slug = 'group-' + slug;
-  const existingFolders = new Set(Object.values(registeredGroups).map(g => g.folder));
-  let candidate = slug;
-  let i = 2;
-  while (existingFolders.has(candidate) || candidate === MAIN_GROUP_FOLDER) {
-    candidate = `${slug}-${i++}`;
-  }
-  return candidate;
-}
-
 function registerGroup(jid: string, group: RegisteredGroup): void {
-  let groupDir: string;
-  try {
-    groupDir = resolveGroupFolderPath(group.folder);
-  } catch (err) {
-    logger.warn(
-      { jid, folder: group.folder, err },
-      'Rejecting group registration with invalid folder',
-    );
-    return;
-  }
-
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
 
   // Create group folder
+  const groupDir = path.join(DATA_DIR, '..', 'groups', group.folder);
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
 
   logger.info(
@@ -182,9 +134,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-  const missedMessages = filterAllowedMessages(
-    getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME),
-  );
+  const missedMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
 
   if (missedMessages.length === 0) return true;
 
@@ -233,16 +183,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        // Suppress short filler confirmations ("Sent!", "Done!", etc.) — these
-        // are redundant noise after the agent already used send_message via IPC.
-        if (/^(sent|done|message sent|delivered|ok)\s*[.!]?\s*(\(.+\))?\s*$/i.test(text)) {
-          logger.debug({ group: group.name, text }, 'Suppressed redundant confirmation');
-        } else {
-          // Clear typing before sending so indicator stops as message arrives
-          await channel.setTyping?.(chatJid, false);
-          await channel.sendMessage(chatJid, text);
-          outputSentToUser = true;
-        }
+        await channel.sendMessage(chatJid, text);
+        outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -285,12 +227,6 @@ async function runAgent(
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
-  const startTime = Date.now();
-  const startedAt = new Date().toISOString();
-
-  // Write session history snapshot for container to read
-  const recentStats = getSessionStats(group.folder);
-  writeSessionStatsSnapshot(group.folder, recentStats);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -317,19 +253,6 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
-  // Write Signal group metadata if this is a Signal group
-  if (chatJid.startsWith('signal:')) {
-    const signalChannel = channels.find(c => c.name === 'signal') as SignalChannel | undefined;
-    if (signalChannel) {
-      const metadata = signalChannel.getGroupMetadata(chatJid);
-      writeGroupMetadataSnapshot(group.folder, metadata ? {
-        description: metadata.description,
-        members: metadata.members,
-        admins: metadata.admins,
-      } : undefined);
-    }
-  }
-
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
@@ -340,9 +263,6 @@ async function runAgent(
         await onOutput(output);
       }
     : undefined;
-
-  let status: 'success' | 'error' = 'error';
-  let errorMsg: string | undefined;
 
   try {
     const output = await runContainerAgent(
@@ -368,43 +288,14 @@ async function runAgent(
         { group: group.name, error: output.error },
         'Container agent error',
       );
-      status = 'error';
-      errorMsg = output.error;
-    } else {
-      status = 'success';
+      return 'error';
     }
+
+    return 'success';
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
-    status = 'error';
-    errorMsg = err instanceof Error ? err.message : String(err);
-  } finally {
-    const completedAt = new Date().toISOString();
-    const durationMs = Date.now() - startTime;
-
-    // Read query_count from container's stats file
-    let queryCount: number | undefined;
-    try {
-      const statsPath = path.join(DATA_DIR, 'ipc', group.folder, 'session_stats.json');
-      const raw = JSON.parse(fs.readFileSync(statsPath, 'utf-8'));
-      queryCount = raw.query_count;
-    } catch {
-      // Container may not have written stats (e.g. early failure)
-    }
-
-    logSessionRun({
-      group_folder: group.folder,
-      chat_jid: chatJid,
-      session_id: sessions[group.folder],
-      duration_ms: durationMs,
-      query_count: queryCount,
-      status,
-      error: errorMsg,
-      started_at: startedAt,
-      completed_at: completedAt,
-    });
+    return 'error';
   }
-
-  return status;
 }
 
 async function startMessageLoop(): Promise<void> {
@@ -449,9 +340,6 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
-          const allowedGroupMessages = filterAllowedMessages(groupMessages);
-          if (allowedGroupMessages.length === 0) continue;
-
           const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
@@ -459,7 +347,7 @@ async function startMessageLoop(): Promise<void> {
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
-            const hasTrigger = allowedGroupMessages.some((m) =>
+            const hasTrigger = groupMessages.some((m) =>
               TRIGGER_PATTERN.test(m.content.trim()),
             );
             if (!hasTrigger) continue;
@@ -467,13 +355,13 @@ async function startMessageLoop(): Promise<void> {
 
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.
-          const allPending = filterAllowedMessages(getMessagesSince(
+          const allPending = getMessagesSince(
             chatJid,
             lastAgentTimestamp[chatJid] || '',
             ASSISTANT_NAME,
-          ));
+          );
           const messagesToSend =
-            allPending.length > 0 ? allPending : allowedGroupMessages;
+            allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend);
 
           if (queue.sendMessage(chatJid, formatted)) {
@@ -543,19 +431,8 @@ async function main(): Promise<void> {
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (_chatJid: string, msg: NewMessage) => storeMessage(msg),
-    onChatMetadata: (chatJid: string, timestamp: string, name?: string, channel?: string, isGroup?: boolean) => {
-      storeChatMetadata(chatJid, timestamp, name, channel, isGroup);
-      if (isGroup && !registeredGroups[chatJid]) {
-        const folderName = slugifyGroupName(name || chatJid);
-        registerGroup(chatJid, {
-          name: name || chatJid,
-          folder: folderName,
-          trigger: `@${ASSISTANT_NAME}`,
-          added_at: new Date().toISOString(),
-          requiresTrigger: true,
-        });
-      }
-    },
+    onChatMetadata: (chatJid: string, timestamp: string, name?: string, channel?: string, isGroup?: boolean) =>
+      storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
   };
 
@@ -589,29 +466,10 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text, attachments) => {
+    sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text, attachments);
-    },
-    sendReaction: (jid, emoji, targetAuthor, targetTimestamp) => {
-      const channel = findChannel(channels, jid);
-      if (!channel?.sendReaction) throw new Error(`No channel with reaction support for JID: ${jid}`);
-      return channel.sendReaction(jid, emoji, targetAuthor, targetTimestamp);
-    },
-    sendReply: (jid, text, targetAuthor, targetTimestamp, attachments) => {
-      const channel = findChannel(channels, jid);
-      if (!channel?.sendReply) {
-        // Fall back to regular message if channel doesn't support replies
-        if (!channel) throw new Error(`No channel for JID: ${jid}`);
-        return channel.sendMessage(jid, text, attachments);
-      }
-      return channel.sendReply(jid, text, targetAuthor, targetTimestamp, attachments);
-    },
-    sendPoll: (jid, question, options) => {
-      const channel = findChannel(channels, jid);
-      if (!channel?.sendPoll) throw new Error(`No channel with poll support for JID: ${jid}`);
-      return channel.sendPoll(jid, question, options);
+      return channel.sendMessage(jid, text);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
@@ -619,17 +477,6 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
   });
-  // Start webhook server if configured
-  if (WEBHOOK_PORT > 0) {
-    if (!WEBHOOK_SECRET) {
-      logger.warn('WEBHOOK_PORT is set but WEBHOOK_SECRET is empty — webhook server disabled');
-    } else {
-      startWebhookServer(WEBHOOK_PORT, WEBHOOK_SECRET, {
-        registeredGroups: () => registeredGroups,
-      });
-    }
-  }
-
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {
