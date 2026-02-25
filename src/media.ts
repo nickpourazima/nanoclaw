@@ -52,11 +52,11 @@ export async function transcribeAudioFile(filePath: string): Promise<string | nu
 
 /**
  * Downscale an image if either dimension exceeds MAX_IMAGE_EDGE.
- * Overwrites the file in place with an optimized JPEG.
- * Returns true if the image was resized, false if already small enough or on error.
+ * Writes the optimized version to a temp directory (preserving the original).
+ * Returns the path to the optimized file, or the original path if no resize was needed.
  */
-export async function optimizeImageForVision(filePath: string): Promise<boolean> {
-  if (!fs.existsSync(filePath)) return false;
+export async function optimizeImageForVision(filePath: string): Promise<string> {
+  if (!fs.existsSync(filePath)) return filePath;
 
   try {
     // Probe dimensions
@@ -68,10 +68,13 @@ export async function optimizeImageForVision(filePath: string): Promise<boolean>
       filePath,
     ]);
     const [w, h] = probeOut.trim().split(',').map(Number);
-    if (!w || !h || (w <= MAX_IMAGE_EDGE && h <= MAX_IMAGE_EDGE)) return false;
+    if (!w || !h || (w <= MAX_IMAGE_EDGE && h <= MAX_IMAGE_EDGE)) return filePath;
 
-    // Resize preserving aspect ratio, cap longest edge at MAX_IMAGE_EDGE
-    const optimizedPath = filePath + '.optimized.jpg';
+    // Write optimized version to temp dir (don't modify signal-cli's original)
+    const tmpDir = path.join(os.tmpdir(), 'nanoclaw-optimized');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const optimizedPath = path.join(tmpDir, `${path.basename(filePath)}.optimized.jpg`);
+
     await exec('ffmpeg', [
       '-y', '-i', filePath,
       '-vf', `scale='if(gt(iw,ih),${MAX_IMAGE_EDGE},-2)':'if(gt(ih,iw),${MAX_IMAGE_EDGE},-2)'`,
@@ -79,13 +82,11 @@ export async function optimizeImageForVision(filePath: string): Promise<boolean>
       optimizedPath,
     ]);
 
-    // Replace original with optimized version
-    fs.renameSync(optimizedPath, filePath);
-    logger.info({ file: filePath, original: `${w}x${h}`, maxEdge: MAX_IMAGE_EDGE }, 'Image optimized for vision');
-    return true;
+    logger.info({ file: filePath, optimized: optimizedPath, original: `${w}x${h}`, maxEdge: MAX_IMAGE_EDGE }, 'Image optimized for vision');
+    return optimizedPath;
   } catch (err) {
     logger.warn({ err, file: filePath }, 'Image optimization failed, using original');
-    return false;
+    return filePath;
   }
 }
 

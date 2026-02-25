@@ -7,6 +7,7 @@
  * - Route: POST /webhook/:group-folder  { text, sender? }
  * - Health: GET /health (no auth)
  */
+import crypto from 'crypto';
 import http from 'http';
 
 import { ASSISTANT_NAME } from './config.js';
@@ -49,9 +50,11 @@ export function startWebhookServer(
       return;
     }
 
-    // Auth check
+    // Auth check (constant-time comparison to prevent timing attacks)
     const authHeader = req.headers.authorization || '';
-    if (authHeader !== `Bearer ${secret}`) {
+    const expected = Buffer.from(`Bearer ${secret}`);
+    const actual = Buffer.from(authHeader);
+    if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Unauthorized' }));
       return;

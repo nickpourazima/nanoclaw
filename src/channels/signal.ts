@@ -312,6 +312,11 @@ export class SignalChannel implements Channel {
       if (this.stdoutBuffer.length > MAX_STDOUT_BUFFER) {
         logger.warn({ size: this.stdoutBuffer.length }, 'Signal stdout buffer exceeded cap, truncating');
         this.stdoutBuffer = this.stdoutBuffer.slice(-MAX_STDOUT_BUFFER);
+        // Discard partial first line to avoid parsing a broken JSON fragment
+        const firstNewline = this.stdoutBuffer.indexOf('\n');
+        if (firstNewline > 0) {
+          this.stdoutBuffer = this.stdoutBuffer.slice(firstNewline + 1);
+        }
       }
       const lines = this.stdoutBuffer.split('\n');
       this.stdoutBuffer = lines.pop() || '';
@@ -505,7 +510,7 @@ export class SignalChannel implements Channel {
         let diskFilename: string | undefined;
         try {
           const files = fs.readdirSync(attachmentsDir);
-          const match = files.find((f) => f.startsWith(id));
+          const match = files.find((f) => f === id || f.startsWith(id + '.'));
           if (match) {
             hostPath = path.join(attachmentsDir, match);
             diskFilename = match;
@@ -595,7 +600,11 @@ export class SignalChannel implements Channel {
           }
         }
         if (att.contentType.startsWith('image/')) {
-          await optimizeImageForVision(att.hostPath);
+          const optimized = await optimizeImageForVision(att.hostPath);
+          if (optimized !== att.hostPath) {
+            att.hostPath = optimized;
+            att.containerPath = `/workspace/signal-attachments/${path.basename(optimized)}`;
+          }
         }
         const label = att.filename || att.contentType;
         parts.push(`[attachment: ${label} → ${att.containerPath}]`);

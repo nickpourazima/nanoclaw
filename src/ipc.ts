@@ -90,12 +90,12 @@ function resolveAttachmentPaths(
     for (const [containerPrefix, hostPrefix] of prefixMap) {
       if (containerPath.startsWith(containerPrefix)) {
         const relative = containerPath.slice(containerPrefix.length);
-        // Reject path traversal attempts
-        if (relative.includes('..')) {
+        const candidate = path.resolve(path.join(hostPrefix, relative));
+        if (!candidate.startsWith(path.resolve(hostPrefix) + path.sep)) {
           logger.warn({ containerPath, sourceGroup }, 'Path traversal rejected in attachment');
           continue;
         }
-        hostPath = path.join(hostPrefix, relative);
+        hostPath = candidate;
         break;
       }
     }
@@ -115,6 +115,8 @@ function resolveAttachmentPaths(
 
   return resolved.length > 0 ? resolved : undefined;
 }
+
+const MAX_IPC_FILE_SIZE = 1_048_576; // 1MB
 
 let ipcWatcherRunning = false;
 
@@ -158,6 +160,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
             try {
+              const stat = fs.statSync(filePath);
+              if (stat.size > MAX_IPC_FILE_SIZE) {
+                logger.warn({ file, size: stat.size, sourceGroup }, 'IPC file exceeds size limit, skipping');
+                fs.renameSync(filePath, filePath + '.oversized');
+                continue;
+              }
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.chatJid) {
                 // Authorization: verify this group can send to this chatJid
@@ -233,6 +241,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of taskFiles) {
             const filePath = path.join(tasksDir, file);
             try {
+              const stat = fs.statSync(filePath);
+              if (stat.size > MAX_IPC_FILE_SIZE) {
+                logger.warn({ file, size: stat.size, sourceGroup }, 'IPC file exceeds size limit, skipping');
+                fs.renameSync(filePath, filePath + '.oversized');
+                continue;
+              }
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               // Pass source group identity to processTaskIpc for authorization
               await processTaskIpc(data, sourceGroup, isMain, deps);
