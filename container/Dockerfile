@@ -23,7 +23,18 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    python3 \
+    ffmpeg \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
+
+# Install uv, create audio analysis venv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+RUN uv venv /opt/audio-venv && \
+    uv pip install --python /opt/audio-venv/bin/python \
+      librosa numpy soundfile matplotlib
+ENV VIRTUAL_ENV=/opt/audio-venv
+ENV PATH="/opt/audio-venv/bin:$PATH"
 
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
