@@ -1,4 +1,4 @@
-skill: channel-features
+skill: channel-interactions
 version: 1.0.0
 description: "Channel-agnostic interaction features: reactions, replies, polls, typing indicators, attachments, and group metadata"
 core_version: 0.1.0

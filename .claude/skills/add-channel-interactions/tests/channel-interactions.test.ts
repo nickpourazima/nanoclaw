@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
-describe('channel-features skill package', () => {
+describe('channel-interactions skill package', () => {
   const skillDir = path.resolve(__dirname, '..');
 
   it('has a valid manifest', () => {
@@ -10,7 +10,7 @@ describe('channel-features skill package', () => {
     expect(fs.existsSync(manifestPath)).toBe(true);
 
     const content = fs.readFileSync(manifestPath, 'utf-8');
-    expect(content).toContain('skill: channel-features');
+    expect(content).toContain('skill: channel-interactions');
     expect(content).toContain('version: 1.0.0');
   });
 
@@ -53,7 +53,7 @@ describe('channel-features skill package', () => {
     expect(fs.existsSync(skillMd)).toBe(true);
 
     const content = fs.readFileSync(skillMd, 'utf-8');
-    expect(content).toContain('add-channel-features');
+    expect(content).toContain('add-channel-interactions');
     expect(content).toContain('Phase 1');
     expect(content).toContain('Phase 2');
     expect(content).toContain('Phase 3');

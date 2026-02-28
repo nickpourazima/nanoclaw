@@ -1,9 +1,9 @@
 ---
-name: add-channel-features
+name: add-channel-interactions
 description: Add channel-agnostic interaction features (reactions, replies, polls, typing, attachments, group metadata) to any NanoClaw channel. Use when building or enhancing a channel that needs interaction capabilities beyond basic messaging.
 ---
 
-# Add Channel Features
+# Add Channel Interactions
 
 This skill extends NanoClaw's Channel interface with optional interaction methods that any channel can implement. Adds reactions, quoted replies, polls, typing indicators, attachment forwarding, and group metadata — all channel-agnostic with graceful fallbacks.
 
@@ -25,7 +25,7 @@ All methods use TypeScript optional syntax (`method?()`) — zero breaking chang
 
 ### Check if already applied
 
-Read `.nanoclaw/state.yaml`. If `channel-features` (the `skill:` key from `manifest.yaml`) is in `applied_skills`, stop — the code changes are already in place.
+Read `.nanoclaw/state.yaml`. If `channel-interactions` (the `skill:` key from `manifest.yaml`) is in `applied_skills`, stop — the code changes are already in place.
 
 ## Phase 2: Apply Code Changes
 
@@ -42,7 +42,7 @@ npx tsx scripts/apply-skill.ts --init
 ### Apply the skill
 
 ```bash
-npx tsx scripts/apply-skill.ts .claude/skills/add-channel-features
+npx tsx scripts/apply-skill.ts .claude/skills/add-channel-interactions
 ```
 
 This deterministically:
@@ -152,7 +152,7 @@ Agents pass this `msg-id` back when reacting or replying, allowing the router to
 
 ## Removal
 
-To remove channel features:
+To remove channel interactions:
 
 1. Revert the optional methods from the `Channel` interface in `src/types.ts`
 2. Remove `sendReaction`, `sendReply`, `sendPoll` from `IpcDeps` in `src/ipc.ts`
